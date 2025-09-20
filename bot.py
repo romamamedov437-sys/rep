@@ -222,7 +222,34 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, "Главное меню:", reply_markup=kb_main())
         return
 
+# ========= ДОБАВЛЕНО: обработчик ошибок и общий логгер апдейтов =========
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.exception("Unhandled error in handler", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Упс, произошла ошибка. Уже чиним. Попробуйте ещё раз."
+            )
+    except Exception:
+        pass
+
+async def log_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kind = (
+        "callback_query" if update.callback_query else
+        "message" if update.message else
+        "channel_post" if update.channel_post else
+        "other"
+    )
+    uid = update.effective_user.id if update.effective_user else "-"
+    log.info(f"Update: kind={kind} from={uid}")
+
 # ========= REGISTER =========
+# (твои обработчики)
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
 tg_app.add_handler(CallbackQueryHandler(on_button))
+
+# (ДОБАВЛЕНО) регистрация логгера и обработчика ошибок
+tg_app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
+tg_app.add_error_handler(on_error)
