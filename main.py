@@ -4,7 +4,6 @@ from typing import Dict, Any, Optional, List
 import httpx
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.error import TelegramError
 
@@ -106,6 +105,15 @@ def user_photos_dir(user_id: str) -> str:
     os.makedirs(d, exist_ok=True)
     return d
 
+def count_user_photos(user_id: str) -> int:
+    pdir = user_photos_dir(user_id)
+    if not os.path.isdir(pdir):
+        return 0
+    return sum(
+        1 for name in os.listdir(pdir)
+        if os.path.isfile(os.path.join(pdir, name))
+    )
+
 def build_zip_of_user_photos(user_id: str) -> str:
     """Собрать ZIP из /photos, положить в /data/uploads, вернуть ПОЛНЫЙ путь к файлу."""
     photos = []
@@ -135,10 +143,6 @@ def public_url_for_zip(zip_path: str) -> str:
     return f"{PUBLIC_URL}/uploads/{fname}"
 
 def _pct_from_replicate_status(state: str) -> int:
-    """
-    Грубая мапа статуса Replicate → проценты (чтобы не было вечного 0%).
-    Подстрой при желании под реальный пайплайн тренера.
-    """
     state = (state or "").lower()
     if state in ("starting", "queued", "pending"):
         return 5
@@ -147,11 +151,10 @@ def _pct_from_replicate_status(state: str) -> int:
     if state in ("succeeded", "completed", "complete"):
         return 100
     if state in ("failed", "canceled", "cancelled", "error"):
-        return 100  # финальный, но неуспешный
+        return 100
     return 0
 
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
-    """POST /v1/trainings — запускаем тренинг у Replicate fast-flux-trainer."""
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
     if not REPLICATE_TRAIN_VERSION:
@@ -161,7 +164,6 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         "version": REPLICATE_TRAIN_VERSION,
         "model": f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}",
         "input": {
-            # поля зависят от конкретного тренера; ниже — типовой минимум:
             "images_zip": images_zip_url,
             "steps": 800
         }
@@ -176,7 +178,6 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         return r.json()
 
 async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
-    """GET /v1/trainings/{id} — получить статус."""
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
     url = f"https://api.replicate.com/v1/trainings/{training_id}"
@@ -187,7 +188,6 @@ async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
         return r.json()
 
 async def call_replicate_generate(prompt: str, model_id: Optional[str], num_images: int) -> List[str]:
-    """Запуск inference на Replicate. Возвращает список URL изображений."""
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
 
@@ -198,9 +198,8 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
             "num_outputs": num_images
         }
     }
-    model_path = REPLICATE_GEN_MODEL  # дефолтная модель
+    model_path = REPLICATE_GEN_MODEL
     if model_id:
-        # пользовательская натренированная модель может быть вида "username/model-name"
         model_path = model_id
 
     url = f"https://api.replicate.com/v1/models/{model_path}/predictions"
@@ -213,12 +212,11 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
         r.raise_for_status()
         data = r.json()
 
-    # Ожидаем завершения (простая опросная логика)
     prediction_url = data["urls"]["get"]
     outputs: List[str] = []
 
     async with httpx.AsyncClient(timeout=120) as cl:
-        for _ in range(60):  # ~60 * 2s = ~2 минуты ожидания
+        for _ in range(60):
             rr = await cl.get(prediction_url, headers=headers)
             rr.raise_for_status()
             dd = rr.json()
@@ -240,7 +238,6 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
 
 @app.post("/api/upload_photo")
 async def api_upload_photo(user_id: str = Form(...), file: UploadFile = File(...)):
-    """Принимаем фотку от бота, кладем в /data/users/<id>/photos"""
     pdir = user_photos_dir(user_id)
     name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{file.filename}"
     path = os.path.join(pdir, name)
@@ -249,20 +246,26 @@ async def api_upload_photo(user_id: str = Form(...), file: UploadFile = File(...
     log.info(f"UPLOAD user={user_id} -> {path}")
     return {"ok": True, "path": path}
 
+@app.get("/api/debug/has_photos/{user_id}")
+async def api_debug_has_photos(user_id: str):
+    """Утилита для бота: вернёт сколько файлов реально лежит для юзера."""
+    cnt = count_user_photos(user_id)
+    return {"user_id": user_id, "count": cnt, "has_photos": cnt > 0}
+
 @app.post("/api/train")
 async def api_train(user_id: str = Form(...)):
-    """Собираем ZIP фото, отдаем ссылку Replicate тренеру, сохраняем training_id в job."""
-    # 1) zip
+    # Проверка на наличие фото: если пусто — честный 400, чтобы бот показал подсказку
+    if count_user_photos(user_id) == 0:
+        raise HTTPException(status_code=400, detail="no photos uploaded")
+
     zip_path = build_zip_of_user_photos(user_id)
     zip_url = public_url_for_zip(zip_path)
 
-    # 2) call replicate
     train = await call_replicate_training(zip_url, user_id)
     training_id = train.get("id") or train.get("uuid")
     if not training_id:
         raise HTTPException(status_code=500, detail="no training_id from replicate")
 
-    # 3) сохранить job
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     jobs[job_id] = {
         "status": "running",
@@ -274,7 +277,6 @@ async def api_train(user_id: str = Form(...)):
     log.info(f"TRAIN started job={job_id} training_id={training_id} user={user_id}")
     return {"job_id": job_id, "status": "started"}
 
-# >>>>>>> ОБНОВЛЁННЫЙ /api/status/{job_id} <<<<<<<
 @app.get("/api/status/{job_id}")
 async def api_status(job_id: str):
     j = jobs.get(job_id)
@@ -287,7 +289,7 @@ async def api_status(job_id: str):
             st = await get_replicate_training_status(training_id)
             state = st.get("status") or st.get("state")
             out = st.get("output") or {}
-            model = out.get("model") or out.get("id")  # зависит от ответа
+            model = out.get("model") or out.get("id")
 
             if state:
                 j["status"] = state
@@ -306,7 +308,6 @@ async def api_status(job_id: str):
         "model_id": j.get("model_id"),
     }
 
-# --- Принимаем И form-data, И чистый JSON:
 @app.post("/api/generate")
 async def api_generate(
     request: Request,
@@ -315,10 +316,6 @@ async def api_generate(
     num_images: Optional[int] = Form(None),
     job_id: Optional[str] = Form(None),
 ):
-    """
-    Запуск генерации: если есть обученная модель — используем её, иначе базовую.
-    Работает и с multipart/form-data (Form), и с application/json (Request.json()).
-    """
     if request.headers.get("content-type", "").lower().startswith("application/json"):
         body = await request.json()
         user_id = body.get("user_id")
