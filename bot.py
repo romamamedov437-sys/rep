@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
-from telegram.error import BadRequest, HTTPBadRequest
+from telegram.error import BadRequest   # 👈 только BadRequest
 
 # ========= ENV =========
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -132,7 +132,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
         except Exception:
-            # даже если debug-роут не ответил — попробуем запустить /api/train и поймать 400
             pass
 
         # 2) Запустить обучение (form-data)
