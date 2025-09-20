@@ -89,9 +89,24 @@ async def healthz():
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
+
+    # 🔹 ДОБАВЛЕНО: гарантируем, что tg_app инициализирован (на случай холодного старта)
+    try:
+        from bot import ensure_initialized
+        await ensure_initialized()
+    except Exception as e:
+        log.error(f"ensure_initialized failed: {e!r}")
+
     data = await request.json()
     update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
+    log.info(f"Webhook update: keys={list(data.keys())}")
+
+    try:
+        await tg_app.process_update(update)
+    except Exception as e:
+        log.exception(f"process_update crashed: {e!r}")
+        return {"ok": False, "error": "handler crashed"}
+
     return {"ok": True}
 
 # ============ HELPERS ============
