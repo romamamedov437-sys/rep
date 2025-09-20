@@ -1,36 +1,68 @@
 import os
-from fastapi import FastAPI, Request
+import logging
+from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
-from telegram.ext import Application
-from bot import setup_handlers
+from telegram.error import TelegramError
 
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret123")
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+from bot import tg_app, ensure_initialized
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("web")
 
 app = FastAPI()
-telegram_app = Application.builder().token(TOKEN).build()
-setup_handlers(telegram_app)
+
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
+WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "hook").strip()
+
+if not BOT_TOKEN:
+    log.warning("BOT_TOKEN не задан — бот не сможет работать.")
+if not PUBLIC_URL:
+    log.warning("PUBLIC_URL не задан — вебхук не будет установлен автоматически.")
 
 @app.on_event("startup")
 async def startup_event():
-    if RENDER_URL:
-        webhook_url = f"{RENDER_URL}/webhook/{WEBHOOK_SECRET}"
-        await telegram_app.bot.set_webhook(webhook_url)
-        print(f"✅ Webhook set: {webhook_url}")
-    else:
-        print("⚠️ RENDER_EXTERNAL_URL не найден")
+    # Инициализируем и запускаем Telegram Application БЕЗ polling
+    await ensure_initialized()
 
-@app.post(f"/webhook/{{secret}}")
-async def webhook(request: Request, secret: str):
-    if secret != WEBHOOK_SECRET:
-        return {"error": "invalid secret"}
+    if PUBLIC_URL:
+        hook_url = f"{PUBLIC_URL}/webhook/{WEBHOOK_SECRET}"
+        try:
+            await tg_app.bot.delete_webhook(drop_pending_updates=True)
+            await tg_app.bot.set_webhook(
+                hook_url,
+                allowed_updates=["message", "callback_query"]
+            )
+            log.info(f"✅ Webhook установлен: {hook_url}")
+        except TelegramError as e:
+            log.error(f"Webhook error: {e!r}")
 
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"status": "ok"}
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        await tg_app.bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+    await tg_app.stop()
+    log.info("🛑 Telegram application stopped")
 
 @app.get("/")
 async def root():
-    return {"message": "🚀 Бот работает. Напиши ему в Telegram /start"}
+    return {"ok": True}
+
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+@app.post("/webhook/{secret}")
+async def webhook(secret: str, request: Request):
+    if secret != WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    # На случай горячего рестарта — ещё раз убеждаемся, что инициализированы
+    await ensure_initialized()
+
+    data = await request.json()
+    update = Update.de_json(data, tg_app.bot)
+    await tg_app.process_update(update)
+    return {"ok": True}
