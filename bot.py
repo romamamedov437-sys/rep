@@ -24,7 +24,14 @@ if not BACKEND_ROOT:
     log.warning("BACKEND_ROOT пуст — train/upload/status/generate работать не будут.")
 
 # ========= APP =========
-tg_app = Application.builder().token(BOT_TOKEN).build()
+# КЛЮЧЕВОЕ: не создаём Updater (иначе падает на Py 3.13).
+tg_app = (
+    Application
+    .builder()
+    .token(BOT_TOKEN)
+    .updater(None)   # <— важная строка
+    .build()
+)
 
 # Флаг/замок для безопасной одноразовой инициализации
 _init_started = False
@@ -62,7 +69,6 @@ async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
     try:
         await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
-        # игнорим «Message is not modified»
         if "Message is not modified" not in str(e):
             raise
 
@@ -113,7 +119,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not BACKEND_ROOT:
             await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
             return
-        # /api/train ждёт form-data
         async with httpx.AsyncClient(timeout=60) as cl:
             r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": uid})
             r.raise_for_status()
