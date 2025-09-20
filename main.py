@@ -2,9 +2,10 @@ import os, io, zipfile, uuid, time, logging, asyncio
 from typing import Dict, Any, Optional, List
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from telegram import Update
 from telegram.error import TelegramError
 
@@ -55,7 +56,7 @@ async def startup_event():
         try:
             await tg_app.bot.delete_webhook(drop_pending_updates=True)
             await tg_app.bot.set_webhook(
-                hook_url, allowed_updates=["message","callback_query"]
+                hook_url, allowed_updates=["message", "callback_query"]
             )
             log.info(f"Webhook set: {hook_url}")
         except TelegramError as e:
@@ -72,10 +73,18 @@ async def shutdown_event():
     await tg_app.stop()
     log.info("🛑 Telegram application stopped")
 
-# ============ HEALTH ============
+# ============ HEALTH & ROOT ============
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+@app.get("/")
+async def root():
+    return {
+        "ok": True,
+        "service": "webhook+replicate backend",
+        "routes": ["/healthz", "/webhook/{secret}", "/api/upload_photo", "/api/train", "/api/status/{job_id}", "/api/generate"]
+    }
 
 # ============ TG WEBHOOK ============
 @app.post("/webhook/{secret}")
@@ -138,7 +147,6 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         "input": {
             # поля зависят от конкретного тренера; ниже — типовой минимум:
             "images_zip": images_zip_url,
-            # при необходимости добавь/измени гиперпараметры под свою задачу
             "steps": 800
         }
     }
@@ -167,7 +175,7 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
 
-    # Если после тренировки у тебя есть свой кастомный model_id — подставляй его.
+    # Если после тренировки у тебя есть свой кастомный model_id — подставим его.
     # Иначе используем базовую модель (REPLICATE_GEN_MODEL/REPLICATE_GEN_VERSION).
     body = {
         "version": REPLICATE_GEN_VERSION,
@@ -176,10 +184,9 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
             "num_outputs": num_images
         }
     }
-    model_path = REPLICATE_GEN_MODEL  # по умолчанию
+    model_path = REPLICATE_GEN_MODEL
     if model_id:
-        # пользовательская натренированная модель может быть вида "username/model-name"
-        model_path = model_id
+        model_path = model_id  # например, "username/model-name"
 
     url = f"https://api.replicate.com/v1/models/{model_path}/predictions"
     headers = {
@@ -193,18 +200,15 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
 
     # Ожидаем завершения (простая опросная логика)
     prediction_url = data["urls"]["get"]
-    status = data.get("status")
     outputs: List[str] = []
-
     async with httpx.AsyncClient(timeout=120) as cl:
-        for _ in range(60):  # ~60 * 2s = ~2 минуты ожидания
+        for _ in range(60):  # ~2 минуты
             rr = await cl.get(prediction_url, headers=headers)
             rr.raise_for_status()
             dd = rr.json()
             status = dd.get("status")
             if status == "succeeded":
                 outs = dd.get("output") or []
-                # output может быть строкой, списком строк, или списком url — нормализуем
                 if isinstance(outs, list):
                     outputs = [str(x) for x in outs]
                 elif isinstance(outs, str):
@@ -266,12 +270,10 @@ async def api_status(job_id: str):
         try:
             st = await get_replicate_training_status(training_id)
             state = st.get("status") or st.get("state")
-            # если Replicate вернул готовую модель — сохраним её идентификатор
             out = st.get("output") or {}
-            model = out.get("model") or out.get("id")  # зависит от ответа
+            model = out.get("model") or out.get("id")  # зависит от ответа тренера
             if state:
                 j["status"] = state
-                # грубо маппим в проценты
                 j["progress"] = 100 if state == "succeeded" else (0 if state in ("starting","queued") else 50)
             if model:
                 j["model_id"] = model
@@ -285,14 +287,39 @@ async def api_status(job_id: str):
         "model_id": j.get("model_id"),
     }
 
+# ====== УНИВЕРСАЛЬНАЯ /api/generate (form + json) ======
+class GenerateJSON(BaseModel):
+    user_id: str | int
+    prompt: str
+    num_images: int = 1
+    job_id: Optional[str] = None
+
 @app.post("/api/generate")
 async def api_generate(
-    user_id: str = Form(...),
-    prompt: str = Form(...),
-    num_images: int = Form(1),
-    job_id: Optional[str] = Form(None),
+    # form-вариант
+    user_id_form: Optional[str] = Form(None),
+    prompt_form: Optional[str] = Form(None),
+    num_images_form: Optional[int] = Form(None),
+    job_id_form: Optional[str] = Form(None),
+    # json-вариант
+    json_body: Optional[GenerateJSON] = Body(None),
 ):
-    """Запуск генерации: если есть обученная модель — используем её, иначе базовую."""
+    """
+    Принимает либо form-data, либо JSON.
+    """
+    if json_body is not None:
+        user_id = str(json_body.user_id)
+        prompt = json_body.prompt
+        num_images = json_body.num_images or 1
+        job_id = json_body.job_id
+    else:
+        if not user_id_form or not prompt_form:
+            raise HTTPException(status_code=400, detail="user_id and prompt are required")
+        user_id = str(user_id_form)
+        prompt = prompt_form
+        num_images = num_images_form or 1
+        job_id = job_id_form
+
     model_id = None
     if job_id and job_id in jobs:
         model_id = jobs[job_id].get("model_id")
