@@ -1,90 +1,196 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+import os
+import logging
+import httpx
+from typing import Dict
 
-from replicate_api import start_training, generate_image
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
+)
+from telegram.error import BadRequest
 
-def setup_handlers(application):
-    # Главное меню
-    def get_main_keyboard():
-        keyboard = [
-            [InlineKeyboardButton("📸 Сгенерировать фото", callback_data="generate")],
-            [InlineKeyboardButton("🎓 Обучить модель", callback_data="train")],
-            [InlineKeyboardButton("ℹ️ О боте", callback_data="about"),
-             InlineKeyboardButton("❓ Помощь", callback_data="help")]
-        ]
-        return InlineKeyboardMarkup(keyboard)
+# ========= ENV =========
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 
-    # /start
-    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "Привет 👋! Я бот для генерации фото.\nВыбери действие:",
-            reply_markup=get_main_keyboard()
+# ========= LOG =========
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("tg-bot")
+
+if not BOT_TOKEN:
+    log.warning("BOT_TOKEN пуст — бот не стартует.")
+if not BACKEND_ROOT:
+    log.warning("BACKEND_ROOT пуст — train/upload/status/generate работать не будут.")
+
+# ========= APP =========
+tg_app = Application.builder().token(BOT_TOKEN).build()
+
+# Флаг/замок для безопасной одноразовой инициализации
+_init_started = False
+async def ensure_initialized() -> None:
+    """Гарантированно инициализировать и запустить tg_app (без polling)."""
+    global _init_started
+    if getattr(tg_app, "_initialized", False):
+        return
+    if _init_started:
+        return
+    _init_started = True
+    await tg_app.initialize()
+    await tg_app.start()
+    log.info("✅ Telegram Application initialized & started (webhook mode)")
+
+# ========= STATE =========
+user_jobs: Dict[int, str] = {}   # user_id -> job_id
+
+# ========= UI =========
+def kb_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📸 Загрузить фото", callback_data="upload")],
+        [InlineKeyboardButton("✅ Фотографии загружены", callback_data="photos_done")],
+        [InlineKeyboardButton("📊 Проверить прогресс", callback_data="status")],
+        [InlineKeyboardButton("✨ Сгенерировать фото", callback_data="generate")],
+    ])
+
+def kb_upload_done() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Фотографии загружены", callback_data="photos_done")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")],
+    ])
+
+async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
+    try:
+        await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        # игнорим «Message is not modified»
+        if "Message is not modified" not in str(e):
+            raise
+
+# ========= HANDLERS =========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "Привет! 👋 Я помогу загрузить фото, обучить модель и сгенерировать портреты.",
+        reply_markup=kb_main()
+    )
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимаем фото, шлём на /api/upload_photo (multipart form)."""
+    if not BACKEND_ROOT:
+        await update.message.reply_text("⚠️ BACKEND_ROOT не настроен.")
+        return
+
+    tgf = await update.message.photo[-1].get_file()
+    local_path = await tgf.download_to_drive()
+
+    async with httpx.AsyncClient(timeout=60) as cl:
+        with open(local_path, "rb") as fp:
+            r = await cl.post(
+                f"{BACKEND_ROOT}/api/upload_photo",
+                data={"user_id": update.effective_user.id},
+                files={"file": ("photo.jpg", fp, "image/jpeg")},
+            )
+            r.raise_for_status()
+
+    await update.message.reply_text(
+        "Фото загружено ✅\nЗагрузите ещё или нажмите «Фотографии загружены», чтобы запустить обучение.",
+        reply_markup=kb_upload_done()
+    )
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    if q.data == "upload":
+        await safe_edit(
+            q,
+            "Пришлите 10–30 фото для обучения. Когда закончите — нажмите кнопку ниже.",
+            reply_markup=kb_upload_done()
         )
+        return
 
-    # /help
-    async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "Доступные команды:\n"
-            "/start — открыть меню\n"
-            "/help — помощь\n"
-            "/about — информация\n\n"
-            "Кнопки:\n📸 — генерация фото\n🎓 — обучение модели"
+    if q.data == "photos_done":
+        if not BACKEND_ROOT:
+            await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
+            return
+        # /api/train ждёт form-data
+        async with httpx.AsyncClient(timeout=60) as cl:
+            r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": uid})
+            r.raise_for_status()
+            data = r.json()
+
+        job_id = data.get("job_id")
+        if not job_id:
+            await safe_edit(q, "❌ Бэкенд не вернул job_id. Попробуйте ещё раз.", reply_markup=kb_main())
+            return
+
+        user_jobs[uid] = job_id
+        await safe_edit(
+            q,
+            f"🚀 Обучение запущено!\nID задачи: `{job_id}`\n\nНажмите «Проверить прогресс».",
+            reply_markup=kb_main(),
+            parse_mode="Markdown"
         )
+        return
 
-    # /about
-    async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "ℹ️ Этот бот обучает модели и генерирует фото через Replicate."
+    if q.data == "status":
+        job_id = user_jobs.get(uid)
+        if not job_id:
+            await safe_edit(q, "❌ У вас нет активной задачи. Сначала обучите модель.", reply_markup=kb_main())
+            return
+
+        if not BACKEND_ROOT:
+            await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
+            return
+
+        async with httpx.AsyncClient(timeout=60) as cl:
+            r = await cl.get(f"{BACKEND_ROOT}/api/status/{job_id}")
+            if r.status_code == 404:
+                await safe_edit(q, "❌ Задача не найдена (сервер перезапускался?). Запустите обучение заново.", reply_markup=kb_main())
+                return
+            r.raise_for_status()
+            data = r.json()
+
+        status = data.get("status", "unknown")
+        progress = data.get("progress", 0)
+        model_id = data.get("model_id") or "—"
+        await safe_edit(
+            q,
+            f"📊 Статус: *{status}*\nПрогресс: *{progress}%*\nМодель: `{model_id}`",
+            reply_markup=kb_main(),
+            parse_mode="Markdown"
         )
+        return
 
-    # Ответ на кнопки
-    async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
+    if q.data == "generate":
+        if not BACKEND_ROOT:
+            await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
+            return
+        payload = {
+            "user_id": uid,
+            "prompt": "studio portrait, cinematic lighting, 85mm, f/1.8, ultra-detailed skin",
+            "num_images": 1
+        }
+        async with httpx.AsyncClient(timeout=120) as cl:
+            r = await cl.post(f"{BACKEND_ROOT}/api/generate", json=payload)
+            r.raise_for_status()
+            data = r.json()
 
-        if query.data == "generate":
-            await query.edit_message_text("📸 Введи промпт для генерации:")
-            context.user_data["mode"] = "generate"
-        elif query.data == "train":
-            await query.edit_message_text("🎓 Отправь фото для обучения (3-10 изображений)")
-            context.user_data["mode"] = "train"
-        elif query.data == "about":
-            await query.edit_message_text("ℹ️ Я бот для генерации фото через Replicate.")
-        elif query.data == "help":
-            await query.edit_message_text("❓ Используй кнопки или команды /start /help /about")
+        urls = data.get("images") or []
+        if not urls:
+            await safe_edit(q, "❌ Бэкенд не вернул изображения.", reply_markup=kb_main())
+            return
 
-    # Обработка текста (промпт для генерации)
-    async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        mode = context.user_data.get("mode")
+        await safe_edit(q, "Готово ✅ Вот результат:", reply_markup=kb_main())
+        for u in urls:
+            await q.message.reply_photo(photo=u)
+        return
 
-        if mode == "generate":
-            prompt = update.message.text
-            await update.message.reply_text("⌛ Генерация фото...")
-            image_url = await generate_image(prompt)
-            if image_url:
-                await update.message.reply_photo(photo=image_url, caption="✅ Сгенерировано")
-            else:
-                await update.message.reply_text("❌ Ошибка генерации")
-            context.user_data["mode"] = None
-        else:
-            await update.message.reply_text(f"Ты написал: {update.message.text}")
+    if q.data == "back_home":
+        await safe_edit(q, "Главное меню:", reply_markup=kb_main())
+        return
 
-    # Обработка фото (обучение модели)
-    async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        mode = context.user_data.get("mode")
-        if mode == "train":
-            await update.message.reply_text("📤 Фото получено. Запускаю обучение...")
-            job_id = await start_training(update.message.photo[-1])
-            if job_id:
-                await update.message.reply_text(f"✅ Обучение запущено!\nID задачи: `{job_id}`")
-            else:
-                await update.message.reply_text("❌ Ошибка при запуске обучения")
-            context.user_data["mode"] = None
-
-    # Подключаем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("about", about_cmd))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+# ========= REGISTER =========
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+tg_app.add_handler(CallbackQueryHandler(on_button))
