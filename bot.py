@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, HTTPBadRequest
 
 # ========= ENV =========
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -33,10 +33,9 @@ tg_app = (
     .build()
 )
 
-# Флаг/замок для безопасной одноразовой инициализации
+# Флаг/замок для безопасной одноразовой инициализации (используется в main.py)
 _init_started = False
 async def ensure_initialized() -> None:
-    """Гарантированно инициализировать и запустить tg_app (без polling)."""
     global _init_started
     if getattr(tg_app, "_initialized", False):
         return
@@ -80,7 +79,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимаем фото, шлём на /api/upload_photo (multipart form)."""
     if not BACKEND_ROOT:
         await update.message.reply_text("⚠️ BACKEND_ROOT не настроен.")
         return
@@ -119,10 +117,40 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not BACKEND_ROOT:
             await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
             return
-        async with httpx.AsyncClient(timeout=60) as cl:
-            r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": uid})
+
+        # 1) Быстрая проверка, что фото реально лежат на сервере
+        try:
+            async with httpx.AsyncClient(timeout=20) as cl:
+                rr = await cl.get(f"{BACKEND_ROOT}/api/debug/has_photos/{uid}")
+                rr.raise_for_status()
+                d = rr.json()
+                if not d.get("has_photos"):
+                    await safe_edit(
+                        q,
+                        "❌ Фотографии не найдены.\nПришлите 10–30 фото (крупным планом, разный ракурс) и нажмите «Фотографии загружены».",
+                        reply_markup=kb_upload_done()
+                    )
+                    return
+        except Exception:
+            # даже если debug-роут не ответил — попробуем запустить /api/train и поймать 400
+            pass
+
+        # 2) Запустить обучение (form-data)
+        try:
+            async with httpx.AsyncClient(timeout=60) as cl:
+                r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": uid})
+            if r.status_code == 400:
+                await safe_edit(
+                    q,
+                    "❌ Фотографии не загружены.\nЗагрузите 10–30 фото и повторите.",
+                    reply_markup=kb_upload_done()
+                )
+                return
             r.raise_for_status()
             data = r.json()
+        except httpx.HTTPStatusError as e:
+            await safe_edit(q, f"❌ Ошибка запуска обучения: {e.response.status_code}", reply_markup=kb_main())
+            return
 
         job_id = data.get("job_id")
         if not job_id:
