@@ -2,7 +2,7 @@ import os, io, zipfile, uuid, time, logging, asyncio
 from typing import Dict, Any, Optional, List
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from telegram import Update
@@ -76,6 +76,10 @@ async def shutdown_event():
 @app.get("/")
 async def root():
     return {"ok": True, "service": "replicate-bridge", "has_public": bool(PUBLIC_URL)}
+
+@app.head("/")
+async def head_root():
+    return Response(status_code=200)
 
 @app.get("/healthz")
 async def healthz():
