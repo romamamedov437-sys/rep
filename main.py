@@ -9,13 +9,16 @@ PUBLIC_URL = os.getenv("PUBLIC_URL")
 
 app = FastAPI()
 
-# Создаём приложение Telegram
+# Создаём Telegram Application
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 
 @app.on_event("startup")
 async def startup_event():
-    # Устанавливаем вебхук для Telegram
+    # Инициализируем Telegram App
+    await telegram_app.initialize()
+
+    # Устанавливаем вебхук
     if PUBLIC_URL:
         webhook_url = f"{PUBLIC_URL}/webhook/{WEBHOOK_SECRET}"
         await telegram_app.bot.set_webhook(url=webhook_url)
@@ -24,9 +27,10 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # Удаляем вебхук при остановке
+    # Убираем вебхук и закрываем бота
     await telegram_app.bot.delete_webhook()
-    print("Webhook deleted")
+    await telegram_app.shutdown()
+    print("Webhook deleted and app shutdown")
 
 
 @app.get("/healthz")
