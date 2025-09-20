@@ -1,60 +1,45 @@
 import os
-import logging
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.ext import Application
 
-from bot import tg_app  # ВАЖНО: тянем Application, НИЧЕГО про run_polling
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("web")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret123")
+PUBLIC_URL = os.getenv("PUBLIC_URL")
 
 app = FastAPI()
 
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
-WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "hook").strip()
+# Создаём приложение Telegram
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-if not BOT_TOKEN:
-    log.warning("BOT_TOKEN не задан — бот не сможет работать.")
-if not PUBLIC_URL:
-    log.warning("PUBLIC_URL не задан — вебхук не будет установлен автоматически.")
 
 @app.on_event("startup")
 async def startup_event():
-    # Стартуем Telegram Application БЕЗ polling
-    await tg_app.initialize()
-    await tg_app.start()
-
+    # Устанавливаем вебхук для Telegram
     if PUBLIC_URL:
-        hook_url = f"{PUBLIC_URL}/webhook/{WEBHOOK_SECRET}"
-        try:
-            await tg_app.bot.delete_webhook(drop_pending_updates=True)
-            await tg_app.bot.set_webhook(
-                hook_url, allowed_updates=["message","callback_query"]
-            )
-            log.info(f"✅ Webhook установлен: {hook_url}")
-        except TelegramError as e:
-            log.error(f"Webhook error: {e!r}")
+        webhook_url = f"{PUBLIC_URL}/webhook/{WEBHOOK_SECRET}"
+        await telegram_app.bot.set_webhook(url=webhook_url)
+        print(f"Webhook set: {webhook_url}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    try:
-        await tg_app.bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
-    await tg_app.stop()
-    log.info("🛑 Telegram application stopped")
+    # Удаляем вебхук при остановке
+    await telegram_app.bot.delete_webhook()
+    print("Webhook deleted")
+
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True}
+    return {"status": "ok"}
 
-@app.post("/webhook/{secret}")
+
+@app.post(f"/webhook/{{secret}}")
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="forbidden")
+        return {"error": "invalid secret"}
+
     data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
-    return {"ok": True}
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"status": "ok"}
