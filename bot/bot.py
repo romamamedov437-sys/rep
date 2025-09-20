@@ -31,8 +31,7 @@ if not BACKEND_ROOT:
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tg-bot")
 
-# ---------- STATE (in-memory) ----------
-# user_id -> last created job_id (from backend /api/train)
+# ---------- STATE ----------
 user_jobs: Dict[int, str] = {}
 
 # ---------- KEYBOARDS ----------
@@ -56,10 +55,6 @@ def kb_upload_done() -> InlineKeyboardMarkup:
 
 # ---------- UTILS ----------
 async def safe_edit(q, text: str, reply_markup=None):
-    """
-    Телеграм ругается, если редактировать сообщение тем же самым текстом и теми же кнопками.
-    Этот helper подавляет только такую ошибку.
-    """
     try:
         await q.edit_message_text(text, reply_markup=reply_markup)
     except BadRequest as e:
@@ -76,10 +71,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Принимаем фото из TG, отправляем на бэкенд /api/upload_photo (multipart form).
-    Ошибки бэкенда отдаём пользователю.
-    """
     try:
         file = await update.message.photo[-1].get_file()
         local_path = await file.download_to_drive()
@@ -116,7 +107,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if q.data == "photos_done":
-        # запускаем обучение
         try:
             async with httpx.AsyncClient(timeout=60) as cl:
                 r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": uid})
@@ -152,8 +142,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if r.status_code == 404:
                     await safe_edit(
                         q,
-                        "❌ Задача не найдена (возможно, сервер перезапускался)."
-                        "\nЗапустите обучение заново.",
+                        "❌ Задача не найдена (возможно, сервер перезапускался).\nЗапустите обучение заново.",
                         reply_markup=kb_main(),
                     )
                     return
@@ -173,7 +162,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if q.data == "generate":
-        # простая генерация для проверки пайплайна
         payload = {
             "user_id": uid,
             "prompt": "studio portrait, cinematic lighting, 85mm, f/1.8, ultra-detailed skin",
@@ -197,25 +185,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, "Главное меню:", reply_markup=kb_main())
         return
 
-# ---------- MAIN ----------
-async def main():
+# ---------- ENTRY ----------
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_button))
 
     log.info("🤖 Bot is starting (long polling)…")
-    await app.initialize()
-    await app.start()
-    try:
-        await app.updater.start_polling(drop_pending_updates=True)
-        await app.updater.wait()  # keep running
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+    # Блокирующий, без asyncio
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
