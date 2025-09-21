@@ -84,7 +84,7 @@ async def head_root():
 async def healthz():
     return {"ok": True}
 
-# ============ ДОБАВЛЕНО: DEBUG РОУТЫ ============
+# ============ ДОБАВЛЕНО: DEBUG РОУТЫ (твои) ============
 @app.get("/debug/webhook_info")
 async def debug_webhook_info():
     try:
@@ -375,3 +375,110 @@ async def api_generate(
     urls = await call_replicate_generate(prompt=prompt, model_id=model_id,
                                          num_images=int(num_images or 1))
     return {"images": urls}
+
+# ==================== ДОБАВЛЕНО НИЖЕ: DEBUG/VERBOSE для Replicate ====================
+
+async def call_replicate_training_verbose(images_zip_url: str, user_id: str) -> Dict[str, Any]:
+    """
+    НЕ заменяет основную функцию. Делает тот же POST, но возвращает полный ответ/ошибку,
+    чтобы точно видеть причину 4xx/5xx от Replicate.
+    """
+    if not REPLICATE_API_TOKEN:
+        return {"ok": False, "where": "env", "detail": "REPLICATE_API_TOKEN not set"}
+    if not REPLICATE_TRAIN_VERSION:
+        return {"ok": False, "where": "env", "detail": "REPLICATE_TRAIN_VERSION not set"}
+
+    payload = {
+        "version": REPLICATE_TRAIN_VERSION,
+        "model": f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}",
+        "input": {"images_zip": images_zip_url, "steps": 800}
+    }
+    headers = {
+        "Authorization": f"Token {REPLICATE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as cl:
+            r = await cl.post(REPLICATE_TRAIN_ENDPOINT, headers=headers, json=payload)
+            text = r.text
+            status = r.status_code
+            out = {"ok": 200 <= status < 300, "status_code": status, "raw_text": text}
+            try:
+                out["json"] = r.json()
+            except Exception:
+                pass
+            return out
+    except httpx.HTTPStatusError as e:
+        return {
+            "ok": False,
+            "where": "httpx.HTTPStatusError",
+            "status_code": getattr(e.response, "status_code", None),
+            "response_text": getattr(e.response, "text", None),
+            "error": str(e),
+        }
+    except Exception as e:
+        return {"ok": False, "where": "exception", "error": repr(e)}
+
+@app.get("/debug/env")
+async def debug_env():
+    """Посмотреть ключевые ENV (токены маскируем)."""
+    def mask(v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        if len(v) <= 8:
+            return "*" * len(v)
+        return v[:4] + "*" * (len(v) - 8) + v[-4:]
+
+    return {
+        "PUBLIC_URL": PUBLIC_URL,
+        "BACKEND_ROOT": BACKEND_ROOT,
+        "REPLICATE_TRAIN_ENDPOINT": REPLICATE_TRAIN_ENDPOINT,
+        "REPLICATE_TRAIN_OWNER": REPLICATE_TRAIN_OWNER,
+        "REPLICATE_TRAIN_MODEL": REPLICATE_TRAIN_MODEL,
+        "REPLICATE_TRAIN_VERSION": REPLICATE_TRAIN_VERSION,
+        "REPLICATE_GEN_MODEL": REPLICATE_GEN_MODEL,
+        "REPLICATE_GEN_VERSION": REPLICATE_GEN_VERSION,
+        "REPLICATE_API_TOKEN_masked": mask(REPLICATE_API_TOKEN),
+    }
+
+@app.get("/debug/list_photos/{user_id}")
+async def debug_list_photos(user_id: str):
+    """Список файлов, что реально лежат у пользователя."""
+    pdir = user_photos_dir(user_id)
+    files = []
+    if os.path.isdir(pdir):
+        for n in sorted(os.listdir(pdir)):
+            path = os.path.join(pdir, n)
+            if os.path.isfile(path):
+                files.append({"name": n, "size": os.path.getsize(path)})
+    return {"user_id": user_id, "dir": pdir, "files": files, "count": len(files)}
+
+@app.get("/debug/build_zip/{user_id}")
+async def debug_build_zip(user_id: str):
+    """Пробно собрать ZIP и вернуть публичную ссылку (без запуска обучения)."""
+    if count_user_photos(user_id) == 0:
+        raise HTTPException(status_code=400, detail="no photos uploaded")
+    zp = build_zip_of_user_photos(user_id)
+    url = public_url_for_zip(zp)
+    return {"zip_path": zp, "public_url": url}
+
+@app.get("/debug/replicate/train/{user_id}")
+async def debug_replicate_train(user_id: str):
+    """
+    Полный цикл отладки:
+    - проверим, что фото есть,
+    - соберём ZIP,
+    - вернём полный ответ Replicate (включая raw_text), НЕ падаем 500.
+    """
+    if count_user_photos(user_id) == 0:
+        return {"ok": False, "detail": "no photos uploaded"}
+
+    try:
+        zp = build_zip_of_user_photos(user_id)
+        url = public_url_for_zip(zp)
+    except Exception as e:
+        return {"ok": False, "where": "zip/public_url", "error": repr(e)}
+
+    res = await call_replicate_training_verbose(url, user_id)
+    return {"zip_public_url": url, "replicate_response": res}
