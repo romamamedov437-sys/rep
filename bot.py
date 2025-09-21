@@ -8,13 +8,11 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
-from telegram.error import BadRequest   # 👈 только BadRequest
+from telegram.error import BadRequest
 
-# ========= ENV =========
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 
-# ========= LOG =========
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tg-bot")
 
@@ -23,17 +21,14 @@ if not BOT_TOKEN:
 if not BACKEND_ROOT:
     log.warning("BACKEND_ROOT пуст — train/upload/status/generate работать не будут.")
 
-# ========= APP =========
-# КЛЮЧЕВОЕ: не создаём Updater (иначе падает на Py 3.13).
 tg_app = (
     Application
     .builder()
     .token(BOT_TOKEN)
-    .updater(None)   # <— важная строка
+    .updater(None)
     .build()
 )
 
-# Флаг/замок для безопасной одноразовой инициализации (используется в main.py)
 _init_started = False
 async def ensure_initialized() -> None:
     global _init_started
@@ -46,10 +41,8 @@ async def ensure_initialized() -> None:
     await tg_app.start()
     log.info("✅ Telegram Application initialized & started (webhook mode)")
 
-# ========= STATE =========
-user_jobs: Dict[int, str] = {}   # user_id -> job_id
+user_jobs: Dict[int, str] = {}
 
-# ========= UI =========
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📸 Загрузить фото", callback_data="upload")],
@@ -71,7 +64,6 @@ async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
         if "Message is not modified" not in str(e):
             raise
 
-# ========= HANDLERS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Привет! 👋 Я помогу загрузить фото, обучить модель и сгенерировать портреты.",
@@ -117,8 +109,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not BACKEND_ROOT:
             await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
             return
-
-        # 1) Быстрая проверка, что фото реально лежат на сервере
         try:
             async with httpx.AsyncClient(timeout=20) as cl:
                 rr = await cl.get(f"{BACKEND_ROOT}/api/debug/has_photos/{uid}")
@@ -127,14 +117,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not d.get("has_photos"):
                     await safe_edit(
                         q,
-                        "❌ Фотографии не найдены.\nПришлите 10–30 фото (крупным планом, разный ракурс) и нажмите «Фотографии загружены».",
+                        "❌ Фотографии не найдены.\nПришлите 10–30 фото и нажмите «Фотографии загружены».",
                         reply_markup=kb_upload_done()
                     )
                     return
         except Exception:
             pass
 
-        # 2) Запустить обучение (form-data)
         try:
             async with httpx.AsyncClient(timeout=60) as cl:
                 r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": uid})
@@ -170,11 +159,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not job_id:
             await safe_edit(q, "❌ У вас нет активной задачи. Сначала обучите модель.", reply_markup=kb_main())
             return
-
         if not BACKEND_ROOT:
             await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
             return
-
         async with httpx.AsyncClient(timeout=60) as cl:
             r = await cl.get(f"{BACKEND_ROOT}/api/status/{job_id}")
             if r.status_code == 404:
@@ -182,7 +169,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             r.raise_for_status()
             data = r.json()
-
         status = data.get("status", "unknown")
         progress = data.get("progress", 0)
         model_id = data.get("model_id") or "—"
@@ -198,21 +184,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not BACKEND_ROOT:
             await safe_edit(q, "⚠️ BACKEND_ROOT не настроен.", reply_markup=kb_main())
             return
-        payload = {
-            "user_id": uid,
-            "prompt": "studio portrait, cinematic lighting, 85mm, f/1.8, ultra-detailed skin",
-            "num_images": 1
-        }
+        payload = {"user_id": uid, "prompt": "studio portrait, cinematic lighting, 85mm, f/1.8, ultra-detailed skin", "num_images": 1}
         async with httpx.AsyncClient(timeout=120) as cl:
             r = await cl.post(f"{BACKEND_ROOT}/api/generate", json=payload)
             r.raise_for_status()
             data = r.json()
-
         urls = data.get("images") or []
         if not urls:
             await safe_edit(q, "❌ Бэкенд не вернул изображения.", reply_markup=kb_main())
             return
-
         await safe_edit(q, "Готово ✅ Вот результат:", reply_markup=kb_main())
         for u in urls:
             await q.message.reply_photo(photo=u)
@@ -222,34 +202,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, "Главное меню:", reply_markup=kb_main())
         return
 
-# ========= ДОБАВЛЕНО: обработчик ошибок и общий логгер апдейтов =========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.exception("Unhandled error in handler", exc_info=context.error)
     try:
         if isinstance(update, Update) and update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Упс, произошла ошибка. Уже чиним. Попробуйте ещё раз."
-            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Упс, произошла ошибка. Уже чиним. Попробуйте ещё раз.")
     except Exception:
         pass
 
 async def log_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kind = (
-        "callback_query" if update.callback_query else
-        "message" if update.message else
-        "channel_post" if update.channel_post else
-        "other"
-    )
+    kind = ("callback_query" if update.callback_query else "message" if update.message else "channel_post" if update.channel_post else "other")
     uid = update.effective_user.id if update.effective_user else "-"
     log.info(f"Update: kind={kind} from={uid}")
 
-# ========= REGISTER =========
-# (твои обработчики)
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
 tg_app.add_handler(CallbackQueryHandler(on_button))
-
-# (ДОБАВЛЕНО) регистрация логгера и обработчика ошибок
 tg_app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
 tg_app.add_error_handler(on_error)
