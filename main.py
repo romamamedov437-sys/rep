@@ -112,13 +112,33 @@ async def debug_ping(chat_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/debug/set_webhook")
+async def debug_set_webhook():
+    """Проставить вебхук = PUBLIC_URL/webhook/WEBHOOK_SECRET"""
+    try:
+        url = f"{PUBLIC_URL}/webhook/{WEBHOOK_SECRET}"
+        await tg_app.bot.set_webhook(url, allowed_updates=["message", "callback_query"])
+        info = await tg_app.bot.get_webhook_info()
+        return {"set_to": url, "webhook_url": info.url, "pending_update_count": info.pending_update_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug/delete_webhook")
+async def debug_delete_webhook():
+    """Сбросить вебхук (на всякий случай)"""
+    try:
+        await tg_app.bot.delete_webhook(drop_pending_updates=True)
+        info = await tg_app.bot.get_webhook_info()
+        return {"after_delete_webhook_url": info.url, "pending_update_count": info.pending_update_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============ TG WEBHOOK ============
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
 
-    # 🔹 ДОБАВЛЕНО: гарантируем, что tg_app инициализирован (на случай холодного старта)
     try:
         from bot import ensure_initialized
         await ensure_initialized()
@@ -158,7 +178,6 @@ def count_user_photos(user_id: str) -> int:
     )
 
 def build_zip_of_user_photos(user_id: str) -> str:
-    """Собрать ZIP из /photos, положить в /data/uploads, вернуть ПОЛНЫЙ путь к файлу."""
     photos = []
     pdir = user_photos_dir(user_id)
     if os.path.isdir(pdir):
@@ -179,7 +198,6 @@ def build_zip_of_user_photos(user_id: str) -> str:
     return zip_path
 
 def public_url_for_zip(zip_path: str) -> str:
-    """Вернуть публичный URL на ранее созданный zip в /uploads."""
     if not PUBLIC_URL:
         raise HTTPException(status_code=500, detail="PUBLIC_URL not set")
     fname = os.path.basename(zip_path)
@@ -206,10 +224,7 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
     payload = {
         "version": REPLICATE_TRAIN_VERSION,
         "model": f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}",
-        "input": {
-            "images_zip": images_zip_url,
-            "steps": 800
-        }
+        "input": {"images_zip": images_zip_url, "steps": 800}
     }
     headers = {
         "Authorization": f"Token {REPLICATE_API_TOKEN}",
@@ -236,10 +251,7 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
 
     body = {
         "version": REPLICATE_GEN_VERSION,
-        "input": {
-            "prompt": prompt,
-            "num_outputs": num_images
-        }
+        "input": {"prompt": prompt, "num_outputs": num_images}
     }
     model_path = REPLICATE_GEN_MODEL
     if model_id:
@@ -278,7 +290,6 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
     return outputs
 
 # ============ API: UPLOAD / TRAIN / STATUS / GENERATE ============
-
 @app.post("/api/upload_photo")
 async def api_upload_photo(user_id: str = Form(...), file: UploadFile = File(...)):
     pdir = user_photos_dir(user_id)
@@ -291,13 +302,11 @@ async def api_upload_photo(user_id: str = Form(...), file: UploadFile = File(...
 
 @app.get("/api/debug/has_photos/{user_id}")
 async def api_debug_has_photos(user_id: str):
-    """Утилита для бота: вернёт сколько файлов реально лежит для юзера."""
     cnt = count_user_photos(user_id)
     return {"user_id": user_id, "count": cnt, "has_photos": cnt > 0}
 
 @app.post("/api/train")
 async def api_train(user_id: str = Form(...)):
-    # Проверка на наличие фото: если пусто — честный 400, чтобы бот показал подсказку
     if count_user_photos(user_id) == 0:
         raise HTTPException(status_code=400, detail="no photos uploaded")
 
@@ -310,13 +319,8 @@ async def api_train(user_id: str = Form(...)):
         raise HTTPException(status_code=500, detail="no training_id from replicate")
 
     job_id = f"job_{uuid.uuid4().hex[:8]}"
-    jobs[job_id] = {
-        "status": "running",
-        "progress": 5,
-        "user_id": user_id,
-        "training_id": training_id,
-        "model_id": None,
-    }
+    jobs[job_id] = {"status": "running", "progress": 5, "user_id": user_id,
+                    "training_id": training_id, "model_id": None}
     log.info(f"TRAIN started job={job_id} training_id={training_id} user={user_id}")
     return {"job_id": job_id, "status": "started"}
 
@@ -340,16 +344,11 @@ async def api_status(job_id: str):
 
             if model:
                 j["model_id"] = model
-
         except Exception as e:
             log.warning(f"status fetch failed for {job_id}: {e!r}")
 
-    return {
-        "job_id": job_id,
-        "status": j.get("status"),
-        "progress": j.get("progress", 0),
-        "model_id": j.get("model_id"),
-    }
+    return {"job_id": job_id, "status": j.get("status"),
+            "progress": j.get("progress", 0), "model_id": j.get("model_id")}
 
 @app.post("/api/generate")
 async def api_generate(
@@ -373,5 +372,6 @@ async def api_generate(
     if job_id and job_id in jobs:
         model_id = jobs[job_id].get("model_id")
 
-    urls = await call_replicate_generate(prompt=prompt, model_id=model_id, num_images=int(num_images or 1))
+    urls = await call_replicate_generate(prompt=prompt, model_id=model_id,
+                                         num_images=int(num_images or 1))
     return {"images": urls}
