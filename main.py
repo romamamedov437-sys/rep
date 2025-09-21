@@ -84,6 +84,34 @@ async def head_root():
 async def healthz():
     return {"ok": True}
 
+# ============ ДОБАВЛЕНО: DEBUG РОУТЫ ============
+@app.get("/debug/webhook_info")
+async def debug_webhook_info():
+    try:
+        me = await tg_app.bot.get_me()
+        info = await tg_app.bot.get_webhook_info()
+        return {
+            "bot": {"id": me.id, "username": me.username},
+            "webhook_url": info.url,
+            "has_custom_certificate": info.has_custom_certificate,
+            "pending_update_count": info.pending_update_count,
+            "ip_address": info.ip_address,
+            "last_error_date": info.last_error_date,
+            "last_error_message": info.last_error_message,
+            "max_connections": info.max_connections,
+            "allowed_updates": info.allowed_updates,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug/ping")
+async def debug_ping(chat_id: int):
+    try:
+        msg = await tg_app.bot.send_message(chat_id=chat_id, text="pong ✅")
+        return {"ok": True, "message_id": msg.message_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============ TG WEBHOOK ============
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
