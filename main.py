@@ -21,6 +21,10 @@ REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").
 REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
 
+# если используешь qwen глобальный тренер — понадобится версия его тренера
+REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
+TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
+
 REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 
@@ -96,8 +100,7 @@ async def webhook(secret: str, request: Request):
 # ============ HELPERS ============
 def user_dir(user_id: str) -> str:
     d = os.path.join(USERS_DIR, str(user_id))
-    os.makedirs(d, exist_ok=True
-                 )
+    os.makedirs(d, exist_ok=True)
     return d
 
 def user_photos_dir(user_id: str) -> str:
@@ -146,46 +149,81 @@ def _pct_from_replicate_status(state: str) -> int:
         return 100
     return 0
 
-
 # ---- авто-резолвер версии тренера (LATEST) ----
 async def _resolve_trainer_version_pointer() -> str:
-    from replicate_api import _get_latest_trainer_version_id  # использую твою же функцию
-    # если env задан — он победит
+    # пытаемся взять из ENV
     if REPLICATE_TRAIN_VERSION:
         return (
             REPLICATE_TRAIN_VERSION
             if ":" in REPLICATE_TRAIN_VERSION
             else f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}:{REPLICATE_TRAIN_VERSION}"
         )
+    # иначе — берём latest через вспомогалку из replicate_api
+    try:
+        from replicate_api import _get_latest_trainer_version_id
+    except Exception:
+        _get_latest_trainer_version_id = None
+    if not _get_latest_trainer_version_id:
+        raise HTTPException(500, detail="Cannot resolve trainer version automatically (helper not found)")
     got = await _get_latest_trainer_version_id()
     if not got:
         raise HTTPException(500, detail="Cannot resolve trainer version automatically")
     return got
 
-
-# ---- запуск тренировки (model-scoped endpoint) ----
+# ---- запуск тренировки ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
+    """
+    ДВА РЕЖИМА:
+      1) Qwen LoRA trainer (owner=qwen, model=qwen-image-lora-trainer):
+         POST /v1/models/qwen/qwen-image-lora-trainer/versions/{VID}/trainings
+         payload: destination + input.dataset
+      2) Остальные (по умолчанию replicate/fast-flux-trainer):
+         POST /v1/models/{owner}/{model}/trainings
+         payload: version (owner/model:vid) + input.images_zip
+    """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
-    version_pointer = await _resolve_trainer_version_pointer()
 
-    payload = {
-        "version": version_pointer,
-        "input": {"images_zip": images_zip_url, "steps": 800},
-    }
     headers = {
         "Authorization": f"Token {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
     }
-    url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
 
-    async with httpx.AsyncClient(timeout=120) as cl:
+    # --- режим 1: Qwen глобальный тренер
+    if REPLICATE_TRAIN_OWNER.lower() == "qwen" and REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer":
+        if not REPLICATE_USERNAME:
+            raise HTTPException(500, detail="REPLICATE_USERNAME not set (needed for qwen trainer)")
+        if not REPLICATE_TRAINER_VERSION_ID:
+            raise HTTPException(500, detail="REPLICATE_TRAINER_VERSION_ID not set (needed for qwen trainer)")
+
+        url = f"https://api.replicate.com/v1/models/qwen/qwen-image-lora-trainer/versions/{REPLICATE_TRAINER_VERSION_ID}/trainings"
+        payload = {
+            "destination": f"{REPLICATE_USERNAME}/user-{user_id}-lora",
+            "input": {
+                "dataset": images_zip_url,
+                "steps": TRAIN_STEPS_DEFAULT
+            }
+        }
+        async with httpx.AsyncClient(timeout=180) as cl:
+            r = await cl.post(url, headers=headers, json=payload)
+            if r.status_code >= 400:
+                log.error("Replicate TRAIN (qwen) failed %s: %s", r.status_code, r.text)
+            r.raise_for_status()
+            return r.json()
+
+    # --- режим 2: дефолтный тренер (без явной версии в ENV — возьмём latest автоматически)
+    version_pointer = await _resolve_trainer_version_pointer()
+    url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
+    payload = {
+        "version": version_pointer,
+        "input": {"images_zip": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
+    }
+    async with httpx.AsyncClient(timeout=180) as cl:
         r = await cl.post(url, headers=headers, json=payload)
         if r.status_code >= 400:
             log.error("Replicate TRAIN failed %s: %s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
-
 
 async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
     if not REPLICATE_API_TOKEN:
@@ -197,19 +235,16 @@ async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
         r.raise_for_status()
         return r.json()
 
-
 async def call_replicate_generate(prompt: str, model_id: Optional[str], num_images: int) -> List[str]:
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
 
-    body = {
-        "input": {"prompt": prompt, "num_outputs": num_images}
-    }
+    body = {"input": {"prompt": prompt, "num_outputs": num_images}}
     model_path = model_id or REPLICATE_GEN_MODEL
     url = f"https://api.replicate.com/v1/models/{model_path}/predictions"
     headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=120) as cl:
+    async with httpx.AsyncClient(timeout=180) as cl:
         r = await cl.post(url, headers=headers, json=body)
         r.raise_for_status()
         data = r.json()
@@ -230,7 +265,6 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
             await asyncio.sleep(2)
 
     return outputs
-
 
 # ============ API ============
 @app.post("/api/upload_photo")
