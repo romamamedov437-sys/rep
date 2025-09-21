@@ -20,6 +20,7 @@ REPLICATE_TRAIN_ENDPOINT = os.getenv("REPLICATE_TRAIN_ENDPOINT", "https://api.re
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
 REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()
+REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()  # ⬅️ ДОБАВЛЕНО
 
 REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
@@ -215,14 +216,14 @@ def _pct_from_replicate_status(state: str) -> int:
         return 100
     return 0
 
-# ⬇️ ИСПРАВЛЕНО: правильный URL + подробные логи ошибок
+# ⬇️ ИСПРАВЛЕНО: правильный URL + подробные логи ошибок (для тренеров типа fast-flux-trainer)
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
     if not REPLICATE_TRAIN_VERSION:
         raise HTTPException(status_code=500, detail="REPLICATE_TRAIN_VERSION not set")
 
-    # Правильная конечная точка (не /v1/trainings!)
+    # Правильная конечная точка (для model-scoped тренеров):
     correct_url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
 
     payload = {
@@ -237,6 +238,41 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         r = await cl.post(correct_url, headers=headers, json=payload)
         if r.status_code >= 400:
             log.error("Replicate TRAIN failed %s: %s", r.status_code, r.text)
+        r.raise_for_status()
+        return r.json()
+
+# ⬇️ ДОБАВЛЕНО: глобальный тренер (например qwen/qwen-image-lora-trainer) через /v1/trainings
+async def call_replicate_training_global(images_zip_url: str, user_id: str) -> Dict[str, Any]:
+    """
+    POST https://api.replicate.com/v1/trainings
+    Требует Bearer токен, version (ID) и destination=<username>/<name>.
+    input.* зависит от конкретного тренера (для Qwen LoRA — input_images).
+    """
+    if not REPLICATE_API_TOKEN:
+        raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
+    if not REPLICATE_TRAIN_VERSION:
+        raise HTTPException(status_code=500, detail="REPLICATE_TRAIN_VERSION not set")
+    if not REPLICATE_USERNAME:
+        raise HTTPException(status_code=500, detail="REPLICATE_USERNAME not set")
+
+    destination = f"{REPLICATE_USERNAME}/user-{user_id}-lora"
+    payload = {
+        "version": REPLICATE_TRAIN_VERSION,   # полный version id из вкладки Versions
+        "destination": destination,
+        "input": {
+            "input_images": images_zip_url
+            # при необходимости: гиперпараметры тренера, зависят от модели
+            # "steps": 800,
+        }
+    }
+    headers = {
+        "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=120) as cl:
+        r = await cl.post("https://api.replicate.com/v1/trainings", headers=headers, json=payload)
+        if r.status_code >= 400:
+            log.error("Replicate GLOBAL TRAIN failed %s: %s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
 
@@ -318,7 +354,13 @@ async def api_train(user_id: str = Form(...)):
     zip_path = build_zip_of_user_photos(user_id)
     zip_url = public_url_for_zip(zip_path)
 
-    train = await call_replicate_training(zip_url, user_id)
+    # ⬇️ ДОБАВЛЕНО: выбор правильного пути
+    use_global = REPLICATE_TRAIN_OWNER.lower() == "qwen" or REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer"
+    if use_global:
+        train = await call_replicate_training_global(zip_url, str(user_id))
+    else:
+        train = await call_replicate_training(zip_url, str(user_id))
+
     training_id = train.get("id") or train.get("uuid")
     if not training_id:
         raise HTTPException(status_code=500, detail="no training_id from replicate")
@@ -446,6 +488,7 @@ async def debug_env():
         "REPLICATE_GEN_MODEL": REPLICATE_GEN_MODEL,
         "REPLICATE_GEN_VERSION": REPLICATE_GEN_VERSION,
         "REPLICATE_API_TOKEN_masked": mask(REPLICATE_API_TOKEN),
+        "REPLICATE_USERNAME": REPLICATE_USERNAME,
     }
 
 @app.get("/debug/list_photos/{user_id}")
@@ -488,3 +531,16 @@ async def debug_replicate_train(user_id: str):
 
     res = await call_replicate_training_verbose(url, user_id)
     return {"zip_public_url": url, "replicate_response": res}
+
+# ⬇️ ДОБАВЛЕНО: отдельный дебаг-роут для глобального тренера (опционально)
+@app.get("/debug/replicate/train-global/{user_id}")
+async def debug_replicate_train_global(user_id: str):
+    if count_user_photos(user_id) == 0:
+        return {"ok": False, "detail": "no photos uploaded"}
+    zp = build_zip_of_user_photos(user_id)
+    url = public_url_for_zip(zp)
+    try:
+        data = await call_replicate_training_global(url, user_id)
+        return {"ok": True, "zip_public_url": url, "replicate_response": data}
+    except httpx.HTTPStatusError as e:
+        return {"ok": False, "status": e.response.status_code, "text": e.response.text}
