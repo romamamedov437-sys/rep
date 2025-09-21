@@ -241,12 +241,13 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         r.raise_for_status()
         return r.json()
 
-# ⬇️ ДОБАВЛЕНО: глобальный тренер (например qwen/qwen-image-lora-trainer) через /v1/trainings
+# ⬇️ ИСПРАВЛЕНО: глобальный тренер (например qwen/qwen-image-lora-trainer) через /v1/trainings — ТОЛЬКО Token!
 async def call_replicate_training_global(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
     POST https://api.replicate.com/v1/trainings
-    Требует Bearer токен, version (ID) и destination=<username>/<name>.
-    input.* зависит от конкретного тренера (для Qwen LoRA — input_images).
+    Требует Authorization: Token <r8_...>,
+    version (ID) и destination=<username>/<name>.
+    Для Qwen LoRA — input_images.
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
@@ -257,16 +258,14 @@ async def call_replicate_training_global(images_zip_url: str, user_id: str) -> D
 
     destination = f"{REPLICATE_USERNAME}/user-{user_id}-lora"
     payload = {
-        "version": REPLICATE_TRAIN_VERSION,   # полный version id из вкладки Versions
+        "version": REPLICATE_TRAIN_VERSION,
         "destination": destination,
         "input": {
             "input_images": images_zip_url
-            # при необходимости: гиперпараметры тренера, зависят от модели
-            # "steps": 800,
         }
     }
     headers = {
-        "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+        "Authorization": f"Token {REPLICATE_API_TOKEN}",  # ⬅️ ВАЖНО: Token, НЕ Bearer
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=120) as cl:
@@ -354,7 +353,7 @@ async def api_train(user_id: str = Form(...)):
     zip_path = build_zip_of_user_photos(user_id)
     zip_url = public_url_for_zip(zip_path)
 
-    # ⬇️ ДОБАВЛЕНО: выбор правильного пути
+    # ⬇️ Выбор корректного пути (глобальный Qwen или model-scoped)
     use_global = REPLICATE_TRAIN_OWNER.lower() == "qwen" or REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer"
     if use_global:
         train = await call_replicate_training_global(zip_url, str(user_id))
@@ -532,7 +531,7 @@ async def debug_replicate_train(user_id: str):
     res = await call_replicate_training_verbose(url, user_id)
     return {"zip_public_url": url, "replicate_response": res}
 
-# ⬇️ ДОБАВЛЕНО: отдельный дебаг-роут для глобального тренера (опционально)
+# ⬇️ отдельный дебаг-роут для глобального тренера
 @app.get("/debug/replicate/train-global/{user_id}")
 async def debug_replicate_train_global(user_id: str):
     if count_user_photos(user_id) == 0:
