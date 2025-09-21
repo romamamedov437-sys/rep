@@ -215,15 +215,18 @@ def _pct_from_replicate_status(state: str) -> int:
         return 100
     return 0
 
+# ⬇️ ИСПРАВЛЕНО: правильный URL + подробные логи ошибок
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
     if not REPLICATE_TRAIN_VERSION:
         raise HTTPException(status_code=500, detail="REPLICATE_TRAIN_VERSION not set")
 
+    # Правильная конечная точка (не /v1/trainings!)
+    correct_url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
+
     payload = {
-        "version": REPLICATE_TRAIN_VERSION,
-        "model": f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}",
+        "version": REPLICATE_TRAIN_VERSION,              # это ДОЛЖЕН быть ID версии (hash), не "latest"
         "input": {"images_zip": images_zip_url, "steps": 800}
     }
     headers = {
@@ -231,7 +234,9 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=120) as cl:
-        r = await cl.post(REPLICATE_TRAIN_ENDPOINT, headers=headers, json=payload)
+        r = await cl.post(correct_url, headers=headers, json=payload)
+        if r.status_code >= 400:
+            log.error("Replicate TRAIN failed %s: %s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
 
@@ -390,7 +395,6 @@ async def call_replicate_training_verbose(images_zip_url: str, user_id: str) -> 
 
     payload = {
         "version": REPLICATE_TRAIN_VERSION,
-        "model": f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}",
         "input": {"images_zip": images_zip_url, "steps": 800}
     }
     headers = {
@@ -398,9 +402,11 @@ async def call_replicate_training_verbose(images_zip_url: str, user_id: str) -> 
         "Content-Type": "application/json",
     }
 
+    correct_url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
+
     try:
         async with httpx.AsyncClient(timeout=120) as cl:
-            r = await cl.post(REPLICATE_TRAIN_ENDPOINT, headers=headers, json=payload)
+            r = await cl.post(correct_url, headers=headers, json=payload)
             text = r.text
             status = r.status_code
             out = {"ok": 200 <= status < 300, "status_code": status, "raw_text": text}
