@@ -241,40 +241,45 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         r.raise_for_status()
         return r.json()
 
-# ⬇️ ИСПРАВЛЕНО: глобальный тренер (например qwen/qwen-image-lora-trainer) через /v1/trainings — dataset + Token
+# ⬇️ НОВАЯ РЕАЛИЗАЦИЯ: глобальный (на самом деле scoped) тренер Qwen LoRA
 async def call_replicate_training_global(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
-    POST https://api.replicate.com/v1/trainings
-    Требует Authorization: Token <r8_...>, version (ID) и destination=<username>/<name>.
-    Для Qwen LoRA поле датасета — 'dataset'.
+    Qwen LoRA trainer:
+    POST https://api.replicate.com/v1/models/qwen/qwen-image-lora-trainer/versions/<VERSION_ID>/trainings
+    Требует Authorization: Token <...>, destination=<username>/<slug>, input.dataset=<public-zip-url>.
     """
-    if not REPLICATE_API_TOKEN:
-        raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
-    if not REPLICATE_TRAIN_VERSION:
-        raise HTTPException(status_code=500, detail="REPLICATE_TRAIN_VERSION not set")
-    if not REPLICATE_USERNAME:
-        raise HTTPException(status_code=500, detail="REPLICATE_USERNAME not set")
-
-    destination = f"{REPLICATE_USERNAME}/user-{user_id}-lora"
+    api_token = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
+    username  = (os.getenv("REPLICATE_USERNAME") or "").strip()
+    trainer_model = "qwen/qwen-image-lora-trainer"
+    trainer_version_id = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
     steps = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
+    if not api_token:
+        raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
+    if not username:
+        raise HTTPException(status_code=500, detail="REPLICATE_USERNAME not set")
+    if not trainer_version_id:
+        raise HTTPException(status_code=500, detail="REPLICATE_TRAINER_VERSION_ID not set")
+
+    # scoped endpoint
+    url = f"https://api.replicate.com/v1/models/{trainer_model}/versions/{trainer_version_id}/trainings"
+
     payload = {
-        "version": REPLICATE_TRAIN_VERSION,   # полный version id из вкладки Versions
-        "destination": destination,
+        "destination": f"{username}/user-{user_id}-lora",
         "input": {
-            "dataset": images_zip_url,
+            "dataset": images_zip_url,   # именно 'dataset' для Qwen тренера
             "steps": steps
-            # при желании: "lora_rank": 64, "learning_rate": 0.0002, "default_caption": "..."
         }
     }
     headers = {
-        "Authorization": f"Token {REPLICATE_API_TOKEN}",  # важно: Token
+        "Authorization": f"Token {api_token}",
         "Content-Type": "application/json",
     }
+
     async with httpx.AsyncClient(timeout=120) as cl:
-        r = await cl.post("https://api.replicate.com/v1/trainings", headers=headers, json=payload)
+        r = await cl.post(url, headers=headers, json=payload)
         if r.status_code >= 400:
-            log.error("Replicate GLOBAL TRAIN failed %s: %s", r.status_code, r.text)
+            log.error("Replicate TRAIN (qwen) failed %s: %s", r.status_code, r.text)
         r.raise_for_status()
         return r.json()
 
