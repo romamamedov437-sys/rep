@@ -241,13 +241,12 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         r.raise_for_status()
         return r.json()
 
-# ⬇️ ИСПРАВЛЕНО: глобальный тренер (например qwen/qwen-image-lora-trainer) через /v1/trainings — ТОЛЬКО Token!
+# ⬇️ ИСПРАВЛЕНО: глобальный тренер (например qwen/qwen-image-lora-trainer) через /v1/trainings — dataset + Token
 async def call_replicate_training_global(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
     POST https://api.replicate.com/v1/trainings
-    Требует Authorization: Token <r8_...>,
-    version (ID) и destination=<username>/<name>.
-    Для Qwen LoRA — input_images.
+    Требует Authorization: Token <r8_...>, version (ID) и destination=<username>/<name>.
+    Для Qwen LoRA поле датасета — 'dataset'.
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
@@ -257,15 +256,19 @@ async def call_replicate_training_global(images_zip_url: str, user_id: str) -> D
         raise HTTPException(status_code=500, detail="REPLICATE_USERNAME not set")
 
     destination = f"{REPLICATE_USERNAME}/user-{user_id}-lora"
+    steps = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
+
     payload = {
-        "version": REPLICATE_TRAIN_VERSION,
+        "version": REPLICATE_TRAIN_VERSION,   # полный version id из вкладки Versions
         "destination": destination,
         "input": {
-            "input_images": images_zip_url
+            "dataset": images_zip_url,
+            "steps": steps
+            # при желании: "lora_rank": 64, "learning_rate": 0.0002, "default_caption": "..."
         }
     }
     headers = {
-        "Authorization": f"Token {REPLICATE_API_TOKEN}",  # ⬅️ ВАЖНО: Token, НЕ Bearer
+        "Authorization": f"Token {REPLICATE_API_TOKEN}",  # важно: Token
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=120) as cl:
