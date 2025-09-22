@@ -1,3 +1,5 @@
+# main.py
+
 import os, io, zipfile, uuid, time, logging, asyncio
 from typing import Dict, Any, Optional, List
 
@@ -17,16 +19,18 @@ BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 
 REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
 
-# Тренер: по умолчанию replicate/fast-flux-trainer + ОБЯЗАТЕЛЬНО version hash
+# Тренер (фиксируем ЖЁСТКО fast-flux-trainer с коротким version id — БЕЗ ENV)
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
-REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()
+# ФИКСИРОВАННАЯ ВЕРСИЯ (короткий id из вкладки Versions на странице модели)
+FAST_FLUX_VERSION_FIXED = "replicate/fast-flux-trainer:56cb4a64"
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
 
-# qwen-путь (не используется, если owner!=qwen)
+# qwen-путь (оставляем, но НЕ используется сейчас)
 REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
+# Генерация — как у тебя
 REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 
@@ -93,7 +97,7 @@ async def debug_env():
     return {
         "OWNER": REPLICATE_TRAIN_OWNER,
         "MODEL": REPLICATE_TRAIN_MODEL,
-        "VERSION": REPLICATE_TRAIN_VERSION,
+        "FIXED_VERSION": FAST_FLUX_VERSION_FIXED,  # <- используем ЭТО
         "USERNAME": REPLICATE_USERNAME,
         "API_TOKEN": mask(REPLICATE_API_TOKEN),
         "GEN_MODEL": REPLICATE_GEN_MODEL,
@@ -162,42 +166,35 @@ def _pct_from_replicate_status(state: str) -> int:
     if state in ("failed", "canceled", "cancelled", "error"): return 100
     return 0
 
-def _extract_version_hash(v: str) -> str:
-    v = (v or "").strip()
-    return v.split(":")[-1] if ":" in v else v
-
-# ---- ЗАПУСК ТРЕНИРОВКИ ----
+# ---- ЗАПУСК ТРЕНИРОВКИ (ЖЁСТКО: fast-flux-trainer на /v1/trainings) ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
-    fast-flux-trainer должен идти в /v1/trainings.
-    version = либо чистый HASH, либо owner/model:HASH — оба поддержим.
+    Всегда шлём в глобальный эндпоинт Replicate Trainings:
+      POST https://api.replicate.com/v1/trainings
+    с фиксированной версией fast-flux-trainer:
+      "version": "replicate/fast-flux-trainer:56cb4a64"
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(500, detail="REPLICATE_API_TOKEN not set")
 
-    headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
+    url = "https://api.replicate.com/v1/trainings"
+    headers = {
+        "Authorization": f"Token {REPLICATE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
-    if REPLICATE_TRAIN_OWNER.lower() == "qwen" and REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer":
-        if not REPLICATE_USERNAME: raise HTTPException(500, detail="REPLICATE_USERNAME not set (qwen)")
-        if not REPLICATE_TRAINER_VERSION_ID: raise HTTPException(500, detail="REPLICATE_TRAINER_VERSION_ID not set (qwen)")
-        url = f"https://api.replicate.com/v1/models/qwen/qwen-image-lora-trainer/versions/{REPLICATE_TRAINER_VERSION_ID}/trainings"
-        payload = {"destination": f"{REPLICATE_USERNAME}/user-{user_id}-lora", "input": {"dataset": images_zip_url, "steps": TRAIN_STEPS_DEFAULT}}
-    else:
-        if not REPLICATE_TRAIN_VERSION:
-            raise HTTPException(500, detail="REPLICATE_TRAIN_VERSION not set")
-        # для /v1/trainings Replicate принимает version как pointer ИЛИ как чистый hash
-        version_pointer = (
-            f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}:{_extract_version_hash(REPLICATE_TRAIN_VERSION)}"
-            if ":" not in REPLICATE_TRAIN_VERSION else REPLICATE_TRAIN_VERSION
-        )
-        url = "https://api.replicate.com/v1/trainings"
-        # fast-flux-trainer принимает input_images (zip url). На всякий случай кладём дубль images_zip.
-        payload = {
-            "version": version_pointer,
-            "input": {"input_images": images_zip_url, "images_zip": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
-            # можно добавить destination, если хочешь именовать результаты в своём неймспейсе:
-            # "destination": f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
-        }
+    payload: Dict[str, Any] = {
+        "version": FAST_FLUX_VERSION_FIXED,
+        "input": {
+            # Для fast-flux-trainer подходят поля input_images / images_zip — положим оба.
+            "input_images": images_zip_url,
+            "images_zip": images_zip_url,
+            "steps": TRAIN_STEPS_DEFAULT,
+        },
+    }
+    # Если хочешь выпускать модель в своём неймспейсе — можно добавить destination:
+    if REPLICATE_USERNAME:
+        payload["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
 
     async with httpx.AsyncClient(timeout=180) as cl:
         r = await cl.post(url, headers=headers, json=payload)
