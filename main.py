@@ -16,12 +16,14 @@ WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "hook").strip()
 BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 
 REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
+
+# Тренер: по умолчанию replicate/fast-flux-trainer + ОБЯЗАТЕЛЬНО version hash
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
-REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()   # ДОЛЖЕН быть длинный hash версии
+REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
 
-# qwen-путь оставляем, но по умолчанию не используется
+# qwen-путь (не используется, если owner!=qwen)
 REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
@@ -83,21 +85,17 @@ async def head_root():
 async def healthz():
     return {"ok": True}
 
-# ---- DEBUG ENV (чтобы видеть, что Render подхватил переменные) ----
 @app.get("/debug/env")
 async def debug_env():
     def mask(v: Optional[str]) -> Optional[str]:
-        if not v:
-            return v
-        if len(v) <= 8:
-            return "*" * len(v)
-        return v[:4] + "*" * (len(v) - 8) + v[-4:]
+        if not v: return v
+        return v[:4] + "*" * max(0, len(v)-8) + v[-4:] if len(v) > 8 else "*"*len(v)
     return {
-        "REPLICATE_TRAIN_OWNER": REPLICATE_TRAIN_OWNER,
-        "REPLICATE_TRAIN_MODEL": REPLICATE_TRAIN_MODEL,
-        "REPLICATE_TRAIN_VERSION": REPLICATE_TRAIN_VERSION,
-        "REPLICATE_USERNAME": REPLICATE_USERNAME,
-        "REPLICATE_API_TOKEN": mask(REPLICATE_API_TOKEN),
+        "OWNER": REPLICATE_TRAIN_OWNER,
+        "MODEL": REPLICATE_TRAIN_MODEL,
+        "VERSION": REPLICATE_TRAIN_VERSION,
+        "USERNAME": REPLICATE_USERNAME,
+        "API_TOKEN": mask(REPLICATE_API_TOKEN),
         "GEN_MODEL": REPLICATE_GEN_MODEL,
         "GEN_VERSION": REPLICATE_GEN_VERSION,
     }
@@ -158,63 +156,47 @@ def public_url_for_zip(zip_path: str) -> str:
 
 def _pct_from_replicate_status(state: str) -> int:
     state = (state or "").lower()
-    if state in ("starting", "queued", "pending"):
-        return 5
-    if state in ("processing", "running"):
-        return 50
-    if state in ("succeeded", "completed", "complete"):
-        return 100
-    if state in ("failed", "canceled", "cancelled", "error"):
-        return 100
+    if state in ("starting", "queued", "pending"): return 5
+    if state in ("processing", "running"): return 50
+    if state in ("succeeded", "completed", "complete"): return 100
+    if state in ("failed", "canceled", "cancelled", "error"): return 100
     return 0
 
-# ---- утилита: взять чистый hash версии из ENV (если вдруг указали owner/model:hash) ----
 def _extract_version_hash(v: str) -> str:
     v = (v or "").strip()
-    if ":" in v:
-        return v.split(":")[-1].strip()
-    return v
+    return v.split(":")[-1] if ":" in v else v
 
-# ---- запуск тренировки ----
+# ---- ЗАПУСК ТРЕНИРОВКИ ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
-    По умолчанию — replicate/fast-flux-trainer.
-    POST https://api.replicate.com/v1/models/{owner}/{model}/trainings
-    body:
-      { "version": "<VERSION_HASH>", "input": {"images_zip": "<public-zip>", "steps": N} }
+    fast-flux-trainer должен идти в /v1/trainings.
+    version = либо чистый HASH, либо owner/model:HASH — оба поддержим.
     """
     if not REPLICATE_API_TOKEN:
-        raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
+        raise HTTPException(500, detail="REPLICATE_API_TOKEN not set")
 
-    # Если специально переключишься на qwen/qwen-image-lora-trainer — снизу оставлен отдельный путь
-    is_qwen = (
-        REPLICATE_TRAIN_OWNER.lower() == "qwen"
-        and REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer"
-    )
+    headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
 
-    headers = {
-        "Authorization": f"Token {REPLICATE_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    if is_qwen:
-        if not REPLICATE_USERNAME:
-            raise HTTPException(500, detail="REPLICATE_USERNAME not set (qwen)")
-        if not REPLICATE_TRAINER_VERSION_ID:
-            raise HTTPException(500, detail="REPLICATE_TRAINER_VERSION_ID not set (qwen)")
+    if REPLICATE_TRAIN_OWNER.lower() == "qwen" and REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer":
+        if not REPLICATE_USERNAME: raise HTTPException(500, detail="REPLICATE_USERNAME not set (qwen)")
+        if not REPLICATE_TRAINER_VERSION_ID: raise HTTPException(500, detail="REPLICATE_TRAINER_VERSION_ID not set (qwen)")
         url = f"https://api.replicate.com/v1/models/qwen/qwen-image-lora-trainer/versions/{REPLICATE_TRAINER_VERSION_ID}/trainings"
-        payload = {
-            "destination": f"{REPLICATE_USERNAME}/user-{user_id}-lora",
-            "input": {"dataset": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
-        }
+        payload = {"destination": f"{REPLICATE_USERNAME}/user-{user_id}-lora", "input": {"dataset": images_zip_url, "steps": TRAIN_STEPS_DEFAULT}}
     else:
         if not REPLICATE_TRAIN_VERSION:
             raise HTTPException(500, detail="REPLICATE_TRAIN_VERSION not set")
-        version_hash = _extract_version_hash(REPLICATE_TRAIN_VERSION)
-        url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
+        # для /v1/trainings Replicate принимает version как pointer ИЛИ как чистый hash
+        version_pointer = (
+            f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}:{_extract_version_hash(REPLICATE_TRAIN_VERSION)}"
+            if ":" not in REPLICATE_TRAIN_VERSION else REPLICATE_TRAIN_VERSION
+        )
+        url = "https://api.replicate.com/v1/trainings"
+        # fast-flux-trainer принимает input_images (zip url). На всякий случай кладём дубль images_zip.
         payload = {
-            "version": version_hash,
-            "input": {"images_zip": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
+            "version": version_pointer,
+            "input": {"input_images": images_zip_url, "images_zip": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
+            # можно добавить destination, если хочешь именовать результаты в своём неймспейсе:
+            # "destination": f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
         }
 
     async with httpx.AsyncClient(timeout=180) as cl:
@@ -311,7 +293,6 @@ async def api_status(job_id: str):
             state = st.get("status") or st.get("state")
             out = st.get("output") or {}
             model = out.get("model") or out.get("id") or st.get("destination")
-
             if state:
                 j["status"] = state
                 j["progress"] = _pct_from_replicate_status(state)
