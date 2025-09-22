@@ -209,25 +209,33 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         "steps": TRAIN_STEPS_DEFAULT,
     }
 
+    # ЖЁСТКИЙ destination
+    DESTINATION_MODEL = "romamamedov437-sys/user-6064931063-lora"
+
     # кандидатные URL'ы
     urls_and_payloads: List[Dict[str, Any]] = []
 
     # 1) Global /v1/trainings
-    p1: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input)}
-    if REPLICATE_USERNAME:
-        p1["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+    p1: Dict[str, Any] = {
+        "version": version_pointer,
+        "input": dict(base_input),
+        "destination": DESTINATION_MODEL,
+    }
     urls_and_payloads.append({"url": "https://api.replicate.com/v1/trainings", "payload": p1})
 
     # 2) Model-scoped /models/{owner}/{model}/trainings
-    p2: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input)}
-    if REPLICATE_USERNAME:
-        p2["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+    p2: Dict[str, Any] = {
+        "version": version_pointer,
+        "input": dict(base_input),
+        "destination": DESTINATION_MODEL,
+    }
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/trainings", "payload": p2})
 
     # 3) Version-scoped /models/{owner}/{model}/versions/{hash}/trainings (без "version")
-    p3: Dict[str, Any] = {"input": dict(base_input)}
-    if REPLICATE_USERNAME:
-        p3["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+    p3: Dict[str, Any] = {
+        "input": dict(base_input),
+        "destination": DESTINATION_MODEL,
+    }
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings", "payload": p3})
 
     async with httpx.AsyncClient(timeout=180) as cl:
@@ -245,18 +253,14 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
             except httpx.HTTPStatusError as e:
                 last_text = e.response.text
                 last_code = e.response.status_code
-                # 404 — пробуем следующий вариант
                 if last_code == 404:
                     continue
-                # прочие ошибки — сразу бросаем
                 raise HTTPException(status_code=500, detail=f"replicate train failed ({last_code}): {last_text}")
             except Exception as e:
                 last_text = repr(e)
                 last_code = 0
-                # идём дальше
                 continue
 
-    # если все три варианта не прошли
     raise HTTPException(status_code=500, detail=f"replicate train failed (exhausted urls), last={last_code} {last_text}")
 
 async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
