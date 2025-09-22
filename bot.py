@@ -11,6 +11,7 @@ import httpx
 from telegram import (
     Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 )
+    # PTB 20.x
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -100,12 +101,19 @@ def save_user(st: UserState) -> None:
 
 # ================== HELPERS FROM OLD BOT (safe edit) ==================
 async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
+    """
+    Теперь ВСЕГДА шлём НОВОЕ сообщение, а не редактируем старое.
+    Это убирает проблемы с 'query is too old' и старыми сообщениями после деплоя.
+    """
     try:
-        await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except BadRequest as e:
-        # игнорируем "Message is not modified"
-        if "Message is not modified" not in str(e):
-            raise
+        # отправляем новое сообщение в текущий чат
+        await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest:
+        # редкий фолбэк — попробуем отредактировать, если нельзя отправить новое
+        try:
+            await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except BadRequest:
+            pass
 
 # ================== TELEGRAM APP WRAPPER ==================
 class TgApp:
@@ -140,7 +148,7 @@ class TgApp:
         # обработчик ошибок
         self.app.add_error_handler(on_error)
 
-        # 👇 ОБЯЗАТЕЛЬНО: инициализация PTB до start()
+        # Инициализация PTB обязательна до start()
         await self.app.initialize()
 
     async def start(self):
@@ -251,7 +259,12 @@ class TgApp:
 
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
-        await q.answer()
+        # отвечаем безопасно, чтобы клики по старым кнопкам не ломали логику
+        try:
+            await q.answer()
+        except Exception:
+            pass
+
         uid = q.from_user.id
         st = get_user(uid)
 
