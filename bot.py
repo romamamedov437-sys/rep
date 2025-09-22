@@ -30,9 +30,7 @@ PHOTOS_TMP = os.path.join(DATA_DIR, "tg_tmp")
 os.makedirs(PHOTOS_TMP, exist_ok=True)
 
 # цены (руб.)
-PRICES = {
-    "20": 429, "40": 590, "70": 719
-}
+PRICES = {"20": 429, "40": 590, "70": 719}
 # спец-оффер через 24h
 FLASH_OFFER = {"qty": 50, "price": 379}
 
@@ -115,10 +113,15 @@ class TgApp:
         self.app: Optional[Application] = None
         self._bg_tasks: List[asyncio.Task] = []
 
+    @property
+    def bot(self):
+        """Нужно для main.py: tg_app.bot.delete_webhook / set_webhook"""
+        return self.app.bot if self.app else None
+
     async def initialize(self):
         if not BOT_TOKEN:
             raise RuntimeError("BOT_TOKEN not set")
-        # КЛЮЧЕВОЕ: без Updater (совместимо с Python 3.13, вебхуки)
+        # ВАЖНО: работаем без Updater (совместимо с Python 3.13, вебхуки)
         self.app = (
             Application
             .builder()
@@ -137,10 +140,13 @@ class TgApp:
         # обработчик ошибок
         self.app.add_error_handler(on_error)
 
+        # 👇 ОБЯЗАТЕЛЬНО: инициализация PTB до start()
+        await self.app.initialize()
+
     async def start(self):
         assert self.app
         await self.app.start()
-        # запустим «планировщик» для 24h оффера
+        # фоновая задача (оффер через 24ч)
         self._bg_tasks.append(asyncio.create_task(self._flash_offer_scheduler()))
 
     async def stop(self):
@@ -183,8 +189,10 @@ class TgApp:
         return InlineKeyboardMarkup(buttons)
 
     def kb_upload_fixed(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Фото загружены", callback_data="photos_done")],
-                                     [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]])
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Фото загружены", callback_data="photos_done")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+        ])
 
     def kb_prompts(self) -> InlineKeyboardMarkup:
         rows = [
@@ -379,7 +387,6 @@ class TgApp:
                 "• Вывод средств от <b>500 ₽</b>\n\n"
                 f"Твоя ссылка:\n<code>{link}</code>"
             )
-            # 🔧 ИСПРАВЛЕНО — корректный вызов без дублирования аргумента text
             await safe_edit(q, text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML)
             return
 
@@ -588,10 +595,9 @@ async def log_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========= EXPORT =========
 tg_app = TgApp()
 
-# из «старого» бота: единый инициализатор, который нужно вызывать в main.py
+# (опционально) централизованный инициализатор — main.py его не использует, но пусть будет
 _init_started = False
 async def ensure_initialized() -> None:
-    """Вызывай это в startup_event() из main.py"""
     global _init_started
     if getattr(tg_app, "app", None) and tg_app.app.initialized:
         if not tg_app.app.running:
