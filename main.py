@@ -23,18 +23,23 @@ REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
 
-# ❗ ЖЁСТКО фиксируем ДЛИННУЮ версию (commit) — то, что давал 8b1079...
+# ❗ Фиксированная ДЛИННАЯ версия (commit) fast-flux-trainer
 FAST_FLUX_VERSION_FIXED = "replicate/fast-flux-trainer:8b10794665aed907bb98a1a5324cd1d3a8bea0e9b31e65210967fb9c9e2e08ed"
 
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
 
-# qwen-путь (оставляем на будущее — НЕ используется сейчас)
+# qwen-путь (не используется сейчас)
 REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
-# Генерация — как у тебя
+# ---------- ГЕНЕРАЦИЯ ----------
+# Если в ENV прописан старый путь (например, stability-ai/sdxl), оставим как есть,
+# но автоматически упадём на FLUX.1-schnell при 404.
 REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
+
+# Модель-фолбэк, если указанная вернёт 404
+FLUX_FAST_MODEL = "black-forest-labs/FLUX.1-schnell"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("web")
@@ -104,6 +109,7 @@ async def debug_env():
         "API_TOKEN": mask(REPLICATE_API_TOKEN),
         "GEN_MODEL": REPLICATE_GEN_MODEL,
         "GEN_VERSION": REPLICATE_GEN_VERSION,
+        "GEN_FALLBACK": FLUX_FAST_MODEL,
     }
 
 # ============ WEBHOOK ============
@@ -169,12 +175,6 @@ def _pct_from_replicate_status(state: str) -> int:
     return 0
 
 def _extract_version_hash_from_pointer(pointer: str) -> str:
-    """
-    pointer может быть:
-      - 'replicate/fast-flux-trainer:56cb4a64'  -> '56cb4a64'
-      - 'replicate/fast-flux-trainer:<longhash>' -> '<longhash>'
-      - просто '<hash>'
-    """
     if not pointer:
         return ""
     if ":" in pointer:
@@ -185,9 +185,9 @@ def _extract_version_hash_from_pointer(pointer: str) -> str:
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
     Порядок попыток:
-      1) POST https://api.replicate.com/v1/trainings                        (payload с "version")
-      2) POST https://api.replicate.com/v1/models/{owner}/{model}/trainings (payload с "version")
-      3) POST https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings (без "version" в теле)
+      1) POST https://api.replicate.com/v1/trainings
+      2) POST https://api.replicate.com/v1/models/{owner}/{model}/trainings
+      3) POST https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(500, detail="REPLICATE_API_TOKEN not set")
@@ -202,40 +202,23 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
         "Content-Type": "application/json",
     }
 
-    # базовый инпут
     base_input: Dict[str, Any] = {
         "input_images": images_zip_url,
         "images_zip": images_zip_url,
         "steps": TRAIN_STEPS_DEFAULT,
     }
 
-    # ЖЁСТКИЙ destination
     DESTINATION_MODEL = "romamamedov437-sys/user-6064931063-lora"
 
-    # кандидатные URL'ы
     urls_and_payloads: List[Dict[str, Any]] = []
 
-    # 1) Global /v1/trainings
-    p1: Dict[str, Any] = {
-        "version": version_pointer,
-        "input": dict(base_input),
-        "destination": DESTINATION_MODEL,
-    }
+    p1: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input), "destination": DESTINATION_MODEL}
     urls_and_payloads.append({"url": "https://api.replicate.com/v1/trainings", "payload": p1})
 
-    # 2) Model-scoped /models/{owner}/{model}/trainings
-    p2: Dict[str, Any] = {
-        "version": version_pointer,
-        "input": dict(base_input),
-        "destination": DESTINATION_MODEL,
-    }
+    p2: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input), "destination": DESTINATION_MODEL}
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/trainings", "payload": p2})
 
-    # 3) Version-scoped /models/{owner}/{model}/versions/{hash}/trainings (без "version")
-    p3: Dict[str, Any] = {
-        "input": dict(base_input),
-        "destination": DESTINATION_MODEL,
-    }
+    p3: Dict[str, Any] = {"input": dict(base_input), "destination": DESTINATION_MODEL}
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings", "payload": p3})
 
     async with httpx.AsyncClient(timeout=180) as cl:
@@ -273,19 +256,39 @@ async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
         r.raise_for_status()
         return r.json()
 
+# ---- ГЕНЕРАЦИЯ (с авто-фолбэком на FLUX.1-schnell при 404) ----
+async def _post_prediction(client: httpx.AsyncClient, model_path: str, body: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    url = f"https://api.replicate.com/v1/models/{model_path}/predictions"
+    r = await client.post(url, headers=headers, json=body)
+    if r.status_code == 404:
+        raise httpx.HTTPStatusError("not found", request=r.request, response=r)
+    r.raise_for_status()
+    return r.json()
+
 async def call_replicate_generate(prompt: str, model_id: Optional[str], num_images: int) -> List[str]:
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
 
-    body = {"input": {"prompt": prompt, "num_outputs": num_images}}
-    model_path = model_id or REPLICATE_GEN_MODEL
-    url = f"https://api.replicate.com/v1/models/{model_path}/predictions"
+    # что просим сгенерить
+    body = {"input": {"prompt": prompt, "num_outputs": int(num_images or 1)}}
+
+    # модель из job/ENV или дефолт
+    primary_model = (model_id or REPLICATE_GEN_MODEL or FLUX_FAST_MODEL).strip()
+    fallback_model = FLUX_FAST_MODEL
+
     headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=180) as cl:
-        r = await cl.post(url, headers=headers, json=body)
-        r.raise_for_status()
-        data = r.json()
+        # 1) пробуем то, что указано
+        try:
+            data = await _post_prediction(cl, primary_model, body, headers)
+        except httpx.HTTPStatusError as e:
+            # если 404 — пробуем FLUX
+            if e.response is not None and e.response.status_code == 404 and primary_model != fallback_model:
+                log.warning("Primary gen model '%s' returned 404. Falling back to '%s'", primary_model, fallback_model)
+                data = await _post_prediction(cl, fallback_model, body, headers)
+            else:
+                raise
 
         prediction_url = data["urls"]["get"]
         outputs: List[str] = []
