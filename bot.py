@@ -105,7 +105,8 @@ class TgApp:
         logging.getLogger("tg-bot").setLevel(logging.INFO)
         if not BOT_TOKEN:
             raise RuntimeError("BOT_TOKEN not set")
-        self.app = ApplicationBuilder().token(BOT_TOKEN).build()
+        # ВАЖНАЯ ПРАВКА: работаем без Updater (вебхуки)
+        self.app = ApplicationBuilder().token(BOT_TOKEN).updater(None).build()
 
         self.app.add_handler(CommandHandler("start", self.on_start))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
