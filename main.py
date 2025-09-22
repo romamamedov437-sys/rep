@@ -19,14 +19,16 @@ BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 
 REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
 
-# Тренер (фиксируем ЖЁСТКО fast-flux-trainer с коротким version id — БЕЗ ENV)
+# Тренер fast-flux-trainer
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
-# ФИКСИРОВАННАЯ ВЕРСИЯ (короткий id из вкладки Versions на странице модели)
-FAST_FLUX_VERSION_FIXED = "replicate/fast-flux-trainer:56cb4a64"
+
+# ❗ ЖЁСТКО фиксируем ДЛИННУЮ версию (commit) — то, что давал 8b1079...
+FAST_FLUX_VERSION_FIXED = "replicate/fast-flux-trainer:8b10794665aed907bb98a1a5324cd1d3a8bea0e9b31e65210967fb9c9e2e08ed"
+
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
 
-# qwen-путь (оставляем, но НЕ используется сейчас)
+# qwen-путь (оставляем на будущее — НЕ используется сейчас)
 REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
@@ -97,7 +99,7 @@ async def debug_env():
     return {
         "OWNER": REPLICATE_TRAIN_OWNER,
         "MODEL": REPLICATE_TRAIN_MODEL,
-        "FIXED_VERSION": FAST_FLUX_VERSION_FIXED,  # <- используем ЭТО
+        "FIXED_VERSION": FAST_FLUX_VERSION_FIXED,
         "USERNAME": REPLICATE_USERNAME,
         "API_TOKEN": mask(REPLICATE_API_TOKEN),
         "GEN_MODEL": REPLICATE_GEN_MODEL,
@@ -170,8 +172,8 @@ def _extract_version_hash_from_pointer(pointer: str) -> str:
     """
     pointer может быть:
       - 'replicate/fast-flux-trainer:56cb4a64'  -> '56cb4a64'
-      - просто '56cb4a64'                        -> '56cb4a64'
-      - длинный hash                             -> длинный hash
+      - 'replicate/fast-flux-trainer:<longhash>' -> '<longhash>'
+      - просто '<hash>'
     """
     if not pointer:
         return ""
@@ -179,46 +181,83 @@ def _extract_version_hash_from_pointer(pointer: str) -> str:
         return pointer.split(":")[-1].strip()
     return pointer.strip()
 
-# ---- ЗАПУСК ТРЕНИРОВКИ (ЖЁСТКО: версионный ЭНДПОИНТ модели) ----
+# ---- ЗАПУСК ТРЕНИРОВКИ (надёжный с fallbacks) ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
-    Шлём строго на:
-      POST https://api.replicate.com/v1/models/{OWNER}/{MODEL}/versions/{VERSION_HASH}/trainings
-    Для fast-flux-trainer в body НЕ указываем "version" (он уже в URL).
+    Порядок попыток:
+      1) POST https://api.replicate.com/v1/trainings                        (payload с "version")
+      2) POST https://api.replicate.com/v1/models/{owner}/{model}/trainings (payload с "version")
+      3) POST https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings (без "version" в теле)
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(500, detail="REPLICATE_API_TOKEN not set")
 
-    version_hash = _extract_version_hash_from_pointer(FAST_FLUX_VERSION_FIXED)
-    if not version_hash:
-        raise HTTPException(500, detail="FAST_FLUX_VERSION_FIXED is empty")
+    owner = REPLICATE_TRAIN_OWNER
+    model = REPLICATE_TRAIN_MODEL
+    version_pointer = FAST_FLUX_VERSION_FIXED
+    version_hash = _extract_version_hash_from_pointer(version_pointer)
 
-    url = (
-        f"https://api.replicate.com/v1/models/"
-        f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/versions/{version_hash}/trainings"
-    )
     headers = {
         "Authorization": f"Token {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
     }
 
-    payload: Dict[str, Any] = {
-        "input": {
-            # Для fast-flux-trainer подходят поля input_images / images_zip — кладём оба.
-            "input_images": images_zip_url,
-            "images_zip": images_zip_url,
-            "steps": TRAIN_STEPS_DEFAULT,
-        },
+    # базовый инпут
+    base_input: Dict[str, Any] = {
+        "input_images": images_zip_url,
+        "images_zip": images_zip_url,
+        "steps": TRAIN_STEPS_DEFAULT,
     }
+
+    # кандидатные URL'ы
+    urls_and_payloads: List[Dict[str, Any]] = []
+
+    # 1) Global /v1/trainings
+    p1: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input)}
     if REPLICATE_USERNAME:
-        payload["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+        p1["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+    urls_and_payloads.append({"url": "https://api.replicate.com/v1/trainings", "payload": p1})
+
+    # 2) Model-scoped /models/{owner}/{model}/trainings
+    p2: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input)}
+    if REPLICATE_USERNAME:
+        p2["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+    urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/trainings", "payload": p2})
+
+    # 3) Version-scoped /models/{owner}/{model}/versions/{hash}/trainings (без "version")
+    p3: Dict[str, Any] = {"input": dict(base_input)}
+    if REPLICATE_USERNAME:
+        p3["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
+    urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings", "payload": p3})
 
     async with httpx.AsyncClient(timeout=180) as cl:
-        r = await cl.post(url, headers=headers, json=payload)
-        if r.status_code >= 400:
-            log.error("Replicate TRAIN failed %s: %s", r.status_code, r.text)
-        r.raise_for_status()
-        return r.json()
+        last_text = ""
+        last_code = 0
+        for attempt, item in enumerate(urls_and_payloads, 1):
+            url = item["url"]
+            payload = item["payload"]
+            try:
+                r = await cl.post(url, headers=headers, json=payload)
+                if r.status_code >= 400:
+                    log.error("Replicate TRAIN attempt %d failed %s: %s", attempt, r.status_code, r.text)
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPStatusError as e:
+                last_text = e.response.text
+                last_code = e.response.status_code
+                # 404 — пробуем следующий вариант
+                if last_code == 404:
+                    continue
+                # прочие ошибки — сразу бросаем
+                raise HTTPException(status_code=500, detail=f"replicate train failed ({last_code}): {last_text}")
+            except Exception as e:
+                last_text = repr(e)
+                last_code = 0
+                # идём дальше
+                continue
+
+    # если все три варианта не прошли
+    raise HTTPException(status_code=500, detail=f"replicate train failed (exhausted urls), last={last_code} {last_text}")
 
 async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
     if not REPLICATE_API_TOKEN:
