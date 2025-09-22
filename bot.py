@@ -105,30 +105,22 @@ async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
     Шлём НОВОЕ сообщение (не редактируем), чтобы не «глохнуть» на старых callback'ах.
     Фолбэки: edit -> bot.send_message.
     """
-    # 1) пробуем отправить НОВОЕ сообщение в чат, откуда кликнули
+    # 1) новое сообщение в чат, откуда кликнули
     try:
         if q.message:
             await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
             return
     except Exception:
-        # не только BadRequest — ловим всё (Forbidden, ChatMigrated и т.д.)
         pass
-
-    # 2) если не вышло — пробуем отредактировать исходное сообщение
+    # 2) если не вышло — редактируем исходное
     try:
         await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         return
     except Exception:
         pass
-
-    # 3) последний шанс — прямой send_message по chat_id (PTB20: q.message.chat.id)
+    # 3) последний шанс — прямой send_message по chat_id
     try:
-        chat_id = None
-        if getattr(q, "message", None) and getattr(q.message, "chat", None):
-            chat_id = q.message.chat.id
-        if not chat_id:
-            # inline-кейсы/нет message — шлём пользователю в личку
-            chat_id = q.from_user.id
+        chat_id = q.message.chat.id if getattr(q, "message", None) and getattr(q.message, "chat", None) else q.from_user.id
         await q.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception:
         pass
@@ -616,6 +608,12 @@ class TgApp:
 
 # ========= ДОБАВЛЕНО: обработчик ошибок и общий логгер апдейтов =========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    # Молча игнорируем «просроченные» callback-и, чтобы не валить процесс
+    msg = str(getattr(context, "error", ""))
+    if "query is too old" in msg or "query ID is invalid" in msg or "query is too old and response timeout expired" in msg:
+        log.warning(f"Ignored old callback error: {msg}")
+        return
+
     log.exception("Unhandled error in handler", exc_info=context.error)
     try:
         if isinstance(update, Update) and update.effective_chat:
