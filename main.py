@@ -33,13 +33,13 @@ REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "")
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
 # ---------- ГЕНЕРАЦИЯ ----------
-# Если в ENV прописан старый путь (например, stability-ai/sdxl), оставим как есть,
-# но автоматически упадём на FLUX.1-schnell при 404.
-REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
+# Если в ENV прописан старый путь, используем его,
+# но при 404 упадём на официальную flux-1.1-dev.
+REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/flux-1.1-dev").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 
 # Модель-фолбэк, если указанная вернёт 404
-FLUX_FAST_MODEL = "black-forest-labs/FLUX.1-schnell"
+FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("web")
@@ -256,8 +256,9 @@ async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
         r.raise_for_status()
         return r.json()
 
-# ---- ГЕНЕРАЦИЯ (с авто-фолбэком на FLUX.1-schnell при 404) ----
+# ---- ГЕНЕРАЦИЯ (с авто-фолбэком на flux-1.1-dev при 404) ----
 async def _post_prediction(client: httpx.AsyncClient, model_path: str, body: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    model_path = (model_path or "").strip()  # защита от лишних пробелов/регистра
     url = f"https://api.replicate.com/v1/models/{model_path}/predictions"
     r = await client.post(url, headers=headers, json=body)
     if r.status_code == 404:
@@ -283,7 +284,7 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
         try:
             data = await _post_prediction(cl, primary_model, body, headers)
         except httpx.HTTPStatusError as e:
-            # если 404 — пробуем FLUX
+            # если 404 — пробуем FLUX 1.1 DEV
             if e.response is not None and e.response.status_code == 404 and primary_model != fallback_model:
                 log.warning("Primary gen model '%s' returned 404. Falling back to '%s'", primary_model, fallback_model)
                 data = await _post_prediction(cl, fallback_model, body, headers)
