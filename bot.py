@@ -379,7 +379,8 @@ class TgApp:
                 "• Вывод средств от <b>500 ₽</b>\n\n"
                 f"Твоя ссылка:\n<code>{link}</code>"
             )
-            await safe_edit(text=q, text=text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML)
+            # 🔧 ИСПРАВЛЕНО — корректный вызов без дублирования аргумента text
+            await safe_edit(q, text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML)
             return
 
         if data == "ref_income":
@@ -434,7 +435,7 @@ class TgApp:
 
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
-        st = get_user(uid)
+        _ = get_user(uid)  # если не было — создаст
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         local_path = os.path.join(PHOTOS_TMP, f"{uid}_{int(time.time())}.jpg")
