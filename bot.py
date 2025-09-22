@@ -105,23 +105,32 @@ async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
     Шлём НОВОЕ сообщение (не редактируем), чтобы не «глохнуть» на старых callback'ах.
     Фолбэки: edit -> bot.send_message.
     """
-    # 1) пробуем отправить НОВОЕ
+    # 1) пробуем отправить НОВОЕ сообщение в чат, откуда кликнули
     try:
-        await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        return
-    except BadRequest:
+        if q.message:
+            await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            return
+    except Exception:
+        # не только BadRequest — ловим всё (Forbidden, ChatMigrated и т.д.)
         pass
-    # 2) если не вышло — редактировать старое
+
+    # 2) если не вышло — пробуем отредактировать исходное сообщение
     try:
         await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         return
-    except BadRequest:
-        pass
-    # 3) последний шанс — прямой send_message
-    try:
-        await q.bot.send_message(chat_id=q.message.chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception:
-        # ничего страшного — просто молчим
+        pass
+
+    # 3) последний шанс — прямой send_message по chat_id (PTB20: q.message.chat.id)
+    try:
+        chat_id = None
+        if getattr(q, "message", None) and getattr(q.message, "chat", None):
+            chat_id = q.message.chat.id
+        if not chat_id:
+            # inline-кейсы/нет message — шлём пользователю в личку
+            chat_id = q.from_user.id
+        await q.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
         pass
 
 # ================== TELEGRAM APP WRAPPER ==================
@@ -451,7 +460,8 @@ class TgApp:
                 q,
                 "💳 <b>Вывод средств</b>\n\n"
                 "Пожалуйста, напиши нам @photofly_ai — укажи:\n"
-                "• сумму к выводу\n• свой @ник и ID в боте\n• удобный способ получения\n\n"
+                "• сумму к выводу\n• свой @ник и ID в боте\n"
+                "• удобный способ получения\n\n"
                 "⚠️ Вывод доступен от <b>500 ₽</b>.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("Написать поддержку", url="https://t.me/photofly_ai")],
