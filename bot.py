@@ -99,26 +99,18 @@ def save_user(st: UserState) -> None:
     DB[str(st.id)] = st.__dict__
     _save_db(DB)
 
-# ================== HELPERS FROM OLD BOT (safe edit) ==================
+# ================== SAFE SEND (БЕЗ callback-id) ==================
 async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
     """
-    Шлём НОВОЕ сообщение (не редактируем), чтобы не «глохнуть» на старых callback'ах.
-    Фолбэки: edit -> bot.send_message.
+    Никаких answerCallbackQuery/редактирований.
+    Всегда шлём НОВОЕ сообщение в чат. Это убирает «query is too old».
     """
-    # 1) новое сообщение в чат, откуда кликнули
     try:
-        if q.message:
+        if q and getattr(q, "message", None):
             await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
             return
     except Exception:
         pass
-    # 2) если не вышло — редактируем исходное
-    try:
-        await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        return
-    except Exception:
-        pass
-    # 3) последний шанс — прямой send_message по chat_id
     try:
         chat_id = q.message.chat.id if getattr(q, "message", None) and getattr(q.message, "chat", None) else q.from_user.id
         await q.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -153,12 +145,12 @@ class TgApp:
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.on_photo))
 
-        # лог всех апдейтов (как в старом боте)
+        # лог всех апдейтов
         self.app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
         # обработчик ошибок
         self.app.add_error_handler(on_error)
 
-        # Инициализация PTB обязательна до start()
+        # обязательная инициализация до start()
         await self.app.initialize()
 
     async def start(self):
@@ -270,11 +262,7 @@ class TgApp:
 
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
-        # безопасный answer (не падаем на «query is too old»)
-        try:
-            await q.answer()
-        except Exception:
-            pass
+        # ВАЖНО: НЕ вызываем q.answer() (чтобы не ловить "query is too old")
 
         uid = q.from_user.id
         st = get_user(uid)
@@ -403,7 +391,6 @@ class TgApp:
             return
 
         if data == "account":
-            # Мой аккаунт — красивый вывод баланса и ID
             text = (
                 "👤 <b>Мой аккаунт</b>\n\n"
                 f"• Ваш ID в боте: <code>{uid}</code>\n"
@@ -606,11 +593,15 @@ class TgApp:
         except Exception:
             pass
 
-# ========= ДОБАВЛЕНО: обработчик ошибок и общий логгер апдейтов =========
+# ========= ГЛОБАЛЬНЫЕ ЛОГ/ОШИБКИ =========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # Молча игнорируем «просроченные» callback-и, чтобы не валить процесс
+    # Игнорируем «просроченные» callback-и, чтобы не валить процесс
     msg = str(getattr(context, "error", ""))
-    if "query is too old" in msg or "query ID is invalid" in msg or "query is too old and response timeout expired" in msg:
+    if (
+        "query is too old" in msg
+        or "query ID is invalid" in msg
+        or "response timeout expired" in msg
+    ):
         log.warning(f"Ignored old callback error: {msg}")
         return
 
