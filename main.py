@@ -18,10 +18,10 @@ BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
-REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()
+REPLICATE_TRAIN_VERSION = (os.getenv("REPLICATE_TRAIN_VERSION") or "").strip()   # ДОЛЖЕН быть длинный hash версии
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
 
-# если используешь qwen глобальный тренер — понадобится версия его тренера
+# qwen-путь оставляем, но по умолчанию не используется
 REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
@@ -82,6 +82,25 @@ async def head_root():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+# ---- DEBUG ENV (чтобы видеть, что Render подхватил переменные) ----
+@app.get("/debug/env")
+async def debug_env():
+    def mask(v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        if len(v) <= 8:
+            return "*" * len(v)
+        return v[:4] + "*" * (len(v) - 8) + v[-4:]
+    return {
+        "REPLICATE_TRAIN_OWNER": REPLICATE_TRAIN_OWNER,
+        "REPLICATE_TRAIN_MODEL": REPLICATE_TRAIN_MODEL,
+        "REPLICATE_TRAIN_VERSION": REPLICATE_TRAIN_VERSION,
+        "REPLICATE_USERNAME": REPLICATE_USERNAME,
+        "REPLICATE_API_TOKEN": mask(REPLICATE_API_TOKEN),
+        "GEN_MODEL": REPLICATE_GEN_MODEL,
+        "GEN_VERSION": REPLICATE_GEN_VERSION,
+    }
 
 # ============ WEBHOOK ============
 @app.post("/webhook/{secret}")
@@ -149,75 +168,55 @@ def _pct_from_replicate_status(state: str) -> int:
         return 100
     return 0
 
-# ---- авто-резолвер версии тренера (LATEST) ----
-async def _resolve_trainer_version_pointer() -> str:
-    # пытаемся взять из ENV
-    if REPLICATE_TRAIN_VERSION:
-        return (
-            REPLICATE_TRAIN_VERSION
-            if ":" in REPLICATE_TRAIN_VERSION
-            else f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}:{REPLICATE_TRAIN_VERSION}"
-        )
-    # иначе — берём latest через вспомогалку из replicate_api
-    try:
-        from replicate_api import _get_latest_trainer_version_id
-    except Exception:
-        _get_latest_trainer_version_id = None
-    if not _get_latest_trainer_version_id:
-        raise HTTPException(500, detail="Cannot resolve trainer version automatically (helper not found)")
-    got = await _get_latest_trainer_version_id()
-    if not got:
-        raise HTTPException(500, detail="Cannot resolve trainer version automatically")
-    return got
+# ---- утилита: взять чистый hash версии из ENV (если вдруг указали owner/model:hash) ----
+def _extract_version_hash(v: str) -> str:
+    v = (v or "").strip()
+    if ":" in v:
+        return v.split(":")[-1].strip()
+    return v
 
 # ---- запуск тренировки ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
-    ДВА РЕЖИМА:
-      1) Qwen LoRA trainer (owner=qwen, model=qwen-image-lora-trainer):
-         POST /v1/models/qwen/qwen-image-lora-trainer/versions/{VID}/trainings
-         payload: destination + input.dataset
-      2) Остальные (по умолчанию replicate/fast-flux-trainer):
-         POST /v1/models/{owner}/{model}/trainings
-         payload: version (owner/model:vid) + input.images_zip
+    По умолчанию — replicate/fast-flux-trainer.
+    POST https://api.replicate.com/v1/models/{owner}/{model}/trainings
+    body:
+      { "version": "<VERSION_HASH>", "input": {"images_zip": "<public-zip>", "steps": N} }
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(status_code=500, detail="REPLICATE_API_TOKEN not set")
+
+    # Если специально переключишься на qwen/qwen-image-lora-trainer — снизу оставлен отдельный путь
+    is_qwen = (
+        REPLICATE_TRAIN_OWNER.lower() == "qwen"
+        and REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer"
+    )
 
     headers = {
         "Authorization": f"Token {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
     }
 
-    # --- режим 1: Qwen глобальный тренер
-    if REPLICATE_TRAIN_OWNER.lower() == "qwen" and REPLICATE_TRAIN_MODEL.lower() == "qwen-image-lora-trainer":
+    if is_qwen:
         if not REPLICATE_USERNAME:
-            raise HTTPException(500, detail="REPLICATE_USERNAME not set (needed for qwen trainer)")
+            raise HTTPException(500, detail="REPLICATE_USERNAME not set (qwen)")
         if not REPLICATE_TRAINER_VERSION_ID:
-            raise HTTPException(500, detail="REPLICATE_TRAINER_VERSION_ID not set (needed for qwen trainer)")
-
+            raise HTTPException(500, detail="REPLICATE_TRAINER_VERSION_ID not set (qwen)")
         url = f"https://api.replicate.com/v1/models/qwen/qwen-image-lora-trainer/versions/{REPLICATE_TRAINER_VERSION_ID}/trainings"
         payload = {
             "destination": f"{REPLICATE_USERNAME}/user-{user_id}-lora",
-            "input": {
-                "dataset": images_zip_url,
-                "steps": TRAIN_STEPS_DEFAULT
-            }
+            "input": {"dataset": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
         }
-        async with httpx.AsyncClient(timeout=180) as cl:
-            r = await cl.post(url, headers=headers, json=payload)
-            if r.status_code >= 400:
-                log.error("Replicate TRAIN (qwen) failed %s: %s", r.status_code, r.text)
-            r.raise_for_status()
-            return r.json()
+    else:
+        if not REPLICATE_TRAIN_VERSION:
+            raise HTTPException(500, detail="REPLICATE_TRAIN_VERSION not set")
+        version_hash = _extract_version_hash(REPLICATE_TRAIN_VERSION)
+        url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
+        payload = {
+            "version": version_hash,
+            "input": {"images_zip": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
+        }
 
-    # --- режим 2: дефолтный тренер (без явной версии в ENV — возьмём latest автоматически)
-    version_pointer = await _resolve_trainer_version_pointer()
-    url = f"https://api.replicate.com/v1/models/{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/trainings"
-    payload = {
-        "version": version_pointer,
-        "input": {"images_zip": images_zip_url, "steps": TRAIN_STEPS_DEFAULT},
-    }
     async with httpx.AsyncClient(timeout=180) as cl:
         r = await cl.post(url, headers=headers, json=payload)
         if r.status_code >= 400:
