@@ -11,7 +11,7 @@ import httpx
 from telegram import (
     Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 )
-    # PTB 20.x
+# PTB 20.x
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -102,18 +102,27 @@ def save_user(st: UserState) -> None:
 # ================== HELPERS FROM OLD BOT (safe edit) ==================
 async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
     """
-    Теперь ВСЕГДА шлём НОВОЕ сообщение, а не редактируем старое.
-    Это убирает проблемы с 'query is too old' и старыми сообщениями после деплоя.
+    Шлём НОВОЕ сообщение (не редактируем), чтобы не «глохнуть» на старых callback'ах.
+    Фолбэки: edit -> bot.send_message.
     """
+    # 1) пробуем отправить НОВОЕ
     try:
-        # отправляем новое сообщение в текущий чат
         await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        return
     except BadRequest:
-        # редкий фолбэк — попробуем отредактировать, если нельзя отправить новое
-        try:
-            await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        except BadRequest:
-            pass
+        pass
+    # 2) если не вышло — редактировать старое
+    try:
+        await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        return
+    except BadRequest:
+        pass
+    # 3) последний шанс — прямой send_message
+    try:
+        await q.bot.send_message(chat_id=q.message.chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        # ничего страшного — просто молчим
+        pass
 
 # ================== TELEGRAM APP WRAPPER ==================
 class TgApp:
@@ -182,6 +191,7 @@ class TgApp:
             [InlineKeyboardButton("🖼 Генерации", callback_data="gen_menu")],
             [InlineKeyboardButton("📸 Примеры", callback_data="examples")],
             [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_menu")],
+            [InlineKeyboardButton("👤 Мой аккаунт", callback_data="account")],
             [InlineKeyboardButton("🆘 Поддержка", callback_data="support")],
         ]
         return InlineKeyboardMarkup(buttons)
@@ -259,7 +269,7 @@ class TgApp:
 
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
-        # отвечаем безопасно, чтобы клики по старым кнопкам не ломали логику
+        # безопасный answer (не падаем на «query is too old»)
         try:
             await q.answer()
         except Exception:
@@ -389,6 +399,17 @@ class TgApp:
                 ]),
                 parse_mode=ParseMode.HTML
             )
+            return
+
+        if data == "account":
+            # Мой аккаунт — красивый вывод баланса и ID
+            text = (
+                "👤 <b>Мой аккаунт</b>\n\n"
+                f"• Ваш ID в боте: <code>{uid}</code>\n"
+                f"• Доступно генераций: <b>{st.balance}</b>\n\n"
+                "Нужны ещё генерации? Откройте раздел «🎯 Попробовать»."
+            )
+            await safe_edit(q, text, reply_markup=self.kb_home(has_paid=st.paid_any), parse_mode=ParseMode.HTML)
             return
 
         if data == "ref_menu":
