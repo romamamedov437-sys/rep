@@ -166,33 +166,50 @@ def _pct_from_replicate_status(state: str) -> int:
     if state in ("failed", "canceled", "cancelled", "error"): return 100
     return 0
 
-# ---- ЗАПУСК ТРЕНИРОВКИ (ЖЁСТКО: fast-flux-trainer на /v1/trainings) ----
+def _extract_version_hash_from_pointer(pointer: str) -> str:
+    """
+    pointer может быть:
+      - 'replicate/fast-flux-trainer:56cb4a64'  -> '56cb4a64'
+      - просто '56cb4a64'                        -> '56cb4a64'
+      - длинный hash                             -> длинный hash
+    """
+    if not pointer:
+        return ""
+    if ":" in pointer:
+        return pointer.split(":")[-1].strip()
+    return pointer.strip()
+
+# ---- ЗАПУСК ТРЕНИРОВКИ (ЖЁСТКО: версионный ЭНДПОИНТ модели) ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
     """
-    Всегда шлём в глобальный эндпоинт Replicate Trainings:
-      POST https://api.replicate.com/v1/trainings
-    с фиксированной версией fast-flux-trainer:
-      "version": "replicate/fast-flux-trainer:56cb4a64"
+    Шлём строго на:
+      POST https://api.replicate.com/v1/models/{OWNER}/{MODEL}/versions/{VERSION_HASH}/trainings
+    Для fast-flux-trainer в body НЕ указываем "version" (он уже в URL).
     """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(500, detail="REPLICATE_API_TOKEN not set")
 
-    url = "https://api.replicate.com/v1/trainings"
+    version_hash = _extract_version_hash_from_pointer(FAST_FLUX_VERSION_FIXED)
+    if not version_hash:
+        raise HTTPException(500, detail="FAST_FLUX_VERSION_FIXED is empty")
+
+    url = (
+        f"https://api.replicate.com/v1/models/"
+        f"{REPLICATE_TRAIN_OWNER}/{REPLICATE_TRAIN_MODEL}/versions/{version_hash}/trainings"
+    )
     headers = {
         "Authorization": f"Token {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
     }
 
     payload: Dict[str, Any] = {
-        "version": FAST_FLUX_VERSION_FIXED,
         "input": {
-            # Для fast-flux-trainer подходят поля input_images / images_zip — положим оба.
+            # Для fast-flux-trainer подходят поля input_images / images_zip — кладём оба.
             "input_images": images_zip_url,
             "images_zip": images_zip_url,
             "steps": TRAIN_STEPS_DEFAULT,
         },
     }
-    # Если хочешь выпускать модель в своём неймспейсе — можно добавить destination:
     if REPLICATE_USERNAME:
         payload["destination"] = f"{REPLICATE_USERNAME}/user-{user_id}-fluxlora"
 
