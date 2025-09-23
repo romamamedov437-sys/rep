@@ -1,5 +1,4 @@
 # main.py
-
 import os, io, zipfile, uuid, time, logging, asyncio
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -33,8 +32,6 @@ REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "")
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
 # ---------- ГЕНЕРАЦИЯ ----------
-# Если в ENV прописан старый путь, используем его,
-# но при 404 упадём на официальную flux-1.1-dev.
 REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/flux-1.1-dev").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 
@@ -258,10 +255,6 @@ async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
 
 # ------------- ГЕНЕРАЦИЯ (надёжная с авто-подбором version) -------------
 def _split_model_and_version(model_path: str) -> Tuple[str, Optional[str]]:
-    """
-    Принимает 'owner/model' ИЛИ 'owner/model:versionhash'.
-    Возвращает (owner/model, versionhash|None)
-    """
     model_path = (model_path or "").strip()
     if ":" in model_path:
         m, v = model_path.split(":", 1)
@@ -269,9 +262,6 @@ def _split_model_and_version(model_path: str) -> Tuple[str, Optional[str]]:
     return model_path, None
 
 async def _get_latest_version_hash(client: httpx.AsyncClient, model_name: str, headers: Dict[str, str]) -> str:
-    """
-    Запрашивает /v1/models/{model_name}/versions и берёт самый свежий id.
-    """
     url = f"https://api.replicate.com/v1/models/{model_name}/versions"
     r = await client.get(url, headers=headers)
     r.raise_for_status()
@@ -279,43 +269,26 @@ async def _get_latest_version_hash(client: httpx.AsyncClient, model_name: str, h
     results = data.get("results") or []
     if not results:
         raise HTTPException(status_code=500, detail=f"No versions found for model '{model_name}'")
-    # предполагаем, что первый — последний
     return results[0].get("id") or results[0].get("version")
 
 async def _post_prediction_via_version(client: httpx.AsyncClient, version_hash: str, prompt: str, num_images: int, headers: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Универсальная отправка на /v1/predictions с явной version.
-    """
     body: Dict[str, Any] = {
         "version": version_hash,
-        "input": {
-            "prompt": prompt,
-            "num_outputs": int(num_images or 1)
-        }
+        "input": {"prompt": prompt, "num_outputs": int(num_images or 1)}
     }
     r = await client.post("https://api.replicate.com/v1/predictions", headers=headers, json=body)
     r.raise_for_status()
     return r.json()
 
 async def _resolve_model_and_version(client: httpx.AsyncClient, base_model: str, headers: Dict[str, str]) -> Tuple[str, str]:
-    """
-    Возвращает (model_name, version_hash) для указанной модели, учитывая:
-    - двоеточие в строке модели (owner/model:hash),
-    - REPLICATE_GEN_VERSION (если не 'latest'),
-    - автоподбор latest через API.
-    """
     model_wo_ver, ver_from_id = _split_model_and_version(base_model)
     version_hash = ver_from_id
-
     if not version_hash:
         env_ver = (REPLICATE_GEN_VERSION or "").strip()
         if env_ver and env_ver.lower() != "latest":
             version_hash = env_ver
-
     if not version_hash:
-        # подтянуть latest
         version_hash = await _get_latest_version_hash(client, model_wo_ver, headers)
-
     return model_wo_ver, version_hash
 
 async def call_replicate_generate(prompt: str, model_id: Optional[str], num_images: int) -> List[str]:
@@ -326,20 +299,17 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
     headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=180) as cl:
-        # --- ПЕРВАЯ ПОПЫТКА: указанная модель ---
         try:
-            model_name, version_hash = await _resolve_model_and_version(cl, base_model, headers)
+            _, version_hash = await _resolve_model_and_version(cl, base_model, headers)
             data = await _post_prediction_via_version(cl, version_hash, prompt, int(num_images or 1), headers)
         except httpx.HTTPStatusError as e:
             code = e.response.status_code if e.response is not None else 0
             log.warning("Primary model '%s' failed (%s). Trying fallback '%s'", base_model, code, FLUX_FAST_MODEL)
-            # --- ФОЛБЭК: FLUX_FAST_MODEL ---
-            model_name, version_hash = await _resolve_model_and_version(cl, FLUX_FAST_MODEL, headers)
+            _, version_hash = await _resolve_model_and_version(cl, FLUX_FAST_MODEL, headers)
             data = await _post_prediction_via_version(cl, version_hash, prompt, int(num_images or 1), headers)
 
         prediction_url = data["urls"]["get"]
         outputs: List[str] = []
-
         for _ in range(60):
             rr = await cl.get(prediction_url, headers=headers)
             rr.raise_for_status()
@@ -353,7 +323,6 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
                 err = dd.get("error") or status
                 raise HTTPException(status_code=500, detail=f"replicate generation failed: {err}")
             await asyncio.sleep(2)
-
     return outputs
 
 # ============ API ============
@@ -408,7 +377,7 @@ async def api_status(job_id: str):
             if model:
                 j["model_id"] = model
         except Exception as e:
-            log.warning(f"status fetch failed for {job_id}: {e!r}")
+            logging.getLogger("web").warning(f"status fetch failed for {job_id}: {e!r}")
 
     return {"job_id": job_id, "status": j.get("status"), "progress": j.get("progress", 0), "model_id": j.get("model_id")}
 
