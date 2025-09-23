@@ -8,21 +8,15 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 
 import httpx
-from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
-)
-# PTB 20.x
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from telegram.constants import ParseMode
+from telegram.ext import Application, ContextTypes, CallbackQueryHandler, MessageHandler, CommandHandler, filters
 from telegram.error import BadRequest
-from telegram.ext import (
-    Application, ContextTypes,
-    CallbackQueryHandler, MessageHandler, CommandHandler, filters
-)
 
 # ================== CONFIG ==================
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")  # напр., https://rep-wug0.onrender.com
-PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")      # твой публичный базовый URL (необязательно)
+BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
+PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
 DATA_DIR = os.path.join("/opt/render/project/src", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -30,22 +24,21 @@ DB_PATH = os.path.join(DATA_DIR, "users.json")
 PHOTOS_TMP = os.path.join(DATA_DIR, "tg_tmp")
 os.makedirs(PHOTOS_TMP, exist_ok=True)
 
-# цены (руб.)
 PRICES = {"20": 429, "40": 590, "70": 719}
-# спец-оффер через 24h
 FLASH_OFFER = {"qty": 50, "price": 379}
 
-# промпты (название -> текст для генерации)
-PROMPTS: Dict[str, str] = {
-    "p_ny": "portrait photo in New York city street, urban candid, shallow depth of field, realistic lighting",
-    "p_moscow": "portrait at Moscow-City skyline, modern architecture background, cinematic lighting",
-    "p_studio_soft": "studio headshot, soft light, beauty dish, professional portrait photography, high detail",
-    "p_golden_hour": "outdoor portrait at golden hour, warm sunlight, backlit hair, natural bokeh",
-    "p_euro_casual": "european old town casual street, cobblestone, soft overcast light, lifestyle portrait",
-    "p_business": "corporate business headshot, neutral background, clean lighting, professional attire",
-    "p_nature": "portrait in forest clearing, soft diffused light, greenery, airy and fresh",
-    "p_cyber": "futuristic cyberpunk portrait, neon lights, rain reflections, moody cinematic"
-}
+# Единственный промпт
+PROMPT_ID = "p_main"
+PROMPT_TEXT = (
+    "At the heart of a bustling urban jungle, a man gazes directly into the camera, "
+    "his eyes radiating a confident allure. He's leaning on a graffiti-covered brick wall, "
+    "the vibrant colors serving as a dynamic backdrop. Dressed in an artistic fusion of streetwear "
+    "and futurism, he wears a distressed denim jacket adorned with metallic patches and a holographic "
+    "shirt shimmering subtly beneath. Strands of his tousled hair dance freely in the chilly city breeze. "
+    "Sunset paints the sky in shades of crimson and gold, casting a warm, ethereal glow on his chiseled features. "
+    "The fading daylight reflects off his aviator sunglasses hanging unbuttoned from his shirt. "
+    "His pose, casual and relaxed, mirrors the cool street vibe. His smile, a cryptic smirk, hints at an"
+)
 
 # ================== LOG ==================
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -53,6 +46,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tg-bot")
 
 # ================== STORAGE ==================
+from dataclasses import dataclass
+
 @dataclass
 class UserState:
     id: int
@@ -92,19 +87,14 @@ def get_user(uid: int) -> UserState:
         DB[str(uid)] = st.__dict__
         _save_db(DB)
         return st
-    st = UserState(**s)
-    return st
+    return UserState(**s)
 
 def save_user(st: UserState) -> None:
     DB[str(st.id)] = st.__dict__
     _save_db(DB)
 
-# ================== SAFE SEND (БЕЗ callback-id) ==================
+# ================== SAFE SEND ==================
 async def safe_edit(q, text: str, reply_markup=None, parse_mode=None):
-    """
-    Никаких answerCallbackQuery/редактирований.
-    Всегда шлём НОВОЕ сообщение в чат. Это убирает «query is too old».
-    """
     try:
         if q and getattr(q, "message", None):
             await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -125,38 +115,24 @@ class TgApp:
 
     @property
     def bot(self):
-        """Нужно для main.py: tg_app.bot.delete_webhook / set_webhook"""
         return self.app.bot if self.app else None
 
     async def initialize(self):
         if not BOT_TOKEN:
             raise RuntimeError("BOT_TOKEN not set")
-        # ВАЖНО: работаем без Updater (совместимо с Python 3.13, вебхуки)
-        self.app = (
-            Application
-            .builder()
-            .token(BOT_TOKEN)
-            .updater(None)
-            .build()
-        )
+        self.app = Application.builder().token(BOT_TOKEN).updater(None).build()
 
-        # handlers
         self.app.add_handler(CommandHandler("start", self.on_start))
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.on_photo))
 
-        # лог всех апдейтов
         self.app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
-        # обработчик ошибок
         self.app.add_error_handler(on_error)
-
-        # обязательная инициализация до start()
         await self.app.initialize()
 
     async def start(self):
         assert self.app
         await self.app.start()
-        # фоновая задача (оффер через 24ч)
         self._bg_tasks.append(asyncio.create_task(self._flash_offer_scheduler()))
 
     async def stop(self):
@@ -164,40 +140,34 @@ class TgApp:
             return
         for t in self._bg_tasks:
             t.cancel()
-        try:
-            await self.app.stop()
-        except Exception:
-            pass
-        try:
-            await self.app.shutdown()
-        except Exception:
-            pass
+        try: await self.app.stop()
+        except Exception: pass
+        try: await self.app.shutdown()
+        except Exception: pass
 
     async def process_update(self, update: Update):
         assert self.app
         await self.app.process_update(update)
 
-    # -------------- UI BUILDERS --------------
+    # -------------- UI --------------
     def kb_home(self, has_paid: bool = False) -> InlineKeyboardMarkup:
-        buttons = [
+        return InlineKeyboardMarkup([
             [InlineKeyboardButton("🎯 Попробовать", callback_data="try")],
-            [InlineKeyboardButton("🖼 Генерации", callback_data="gen_menu")],
+            [InlineKeyboardButton("🖼 Генерация", callback_data="gen_menu")],
             [InlineKeyboardButton("📸 Примеры", callback_data="examples")],
             [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_menu")],
             [InlineKeyboardButton("👤 Мой аккаунт", callback_data="account")],
             [InlineKeyboardButton("🆘 Поддержка", callback_data="support")],
-        ]
-        return InlineKeyboardMarkup(buttons)
+        ])
 
     def kb_tariffs(self, discounted: bool = False) -> InlineKeyboardMarkup:
         def price(v): return int(round(v * 0.9)) if discounted else v
-        buttons = [
+        return InlineKeyboardMarkup([
             [InlineKeyboardButton(f"20 генераций — {price(PRICES['20'])} ₽", callback_data="buy_20")],
             [InlineKeyboardButton(f"40 генераций — {price(PRICES['40'])} ₽", callback_data="buy_40")],
             [InlineKeyboardButton(f"70 генераций — {price(PRICES['70'])} ₽", callback_data="buy_70")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")],
-        ]
-        return InlineKeyboardMarkup(buttons)
+        ])
 
     def kb_upload_fixed(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
@@ -205,19 +175,11 @@ class TgApp:
             [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
         ])
 
-    def kb_prompts(self) -> InlineKeyboardMarkup:
-        rows = [
-            [InlineKeyboardButton("🗽 Нью-Йорк street", callback_data="p_ny")],
-            [InlineKeyboardButton("🏙 Москва-Сити", callback_data="p_moscow")],
-            [InlineKeyboardButton("🎞 Студийный (soft)", callback_data="p_studio_soft")],
-            [InlineKeyboardButton("🌆 Золотой час", callback_data="p_golden_hour")],
-            [InlineKeyboardButton("🧳 Europe casual", callback_data="p_euro_casual")],
-            [InlineKeyboardButton("🧠 Business headshot", callback_data="p_business")],
-            [InlineKeyboardButton("🌿 Природа", callback_data="p_nature")],
-            [InlineKeyboardButton("💡 Киберпанк", callback_data="p_cyber")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")],
-        ]
-        return InlineKeyboardMarkup(rows)
+    def kb_prompt_single(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏙 Urban portrait", callback_data=PROMPT_ID)],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+        ])
 
     def kb_buy_or_back(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
@@ -238,7 +200,6 @@ class TgApp:
         u = update.effective_user
         st = get_user(u.id)
 
-        # разбор рефкод из /start
         if context.args:
             arg = context.args[0]
             if arg.startswith("ref_"):
@@ -252,22 +213,16 @@ class TgApp:
 
         text = (
             "👋 <b>Привет!</b> Это <b>PhotoFly</b> — твоя персональная фотостудия с ИИ.\n\n"
-            "Что мы сделаем:\n"
-            "• превратим твои обычные фото в профессиональные портреты\n"
-            "• сгенерируем образы в разных стилях (Нью-Йорк, Москва-Сити, студийные сетапы и т.д.)\n"
-            "• без долгого ожидания и сложностей\n\n"
-            "Начнём?"
+            "Загрузи фото, обучим твою модель и будем генерить образы."
         )
         await update.effective_message.reply_text(text, reply_markup=self.kb_home(), parse_mode=ParseMode.HTML)
 
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
-        # ВАЖНО: НЕ вызываем q.answer() (чтобы не ловить "query is too old")
-
         uid = q.from_user.id
         st = get_user(uid)
-
         data = q.data or ""
+
         if data == "back_home":
             await safe_edit(q, "📍 Главное меню", reply_markup=self.kb_home(has_paid=st.paid_any))
             return
@@ -277,18 +232,16 @@ class TgApp:
             if discounted:
                 text = (
                     "💎 <b>Тарифы генераций</b> <i>(скидка −10% по реферальной ссылке)</i>\n\n"
-                    f"• 20 генераций — <s>{PRICES['20']} ₽</s> <b>{int(round(PRICES['20']*0.9))} ₽</b>\n"
-                    f"• 40 генераций — <s>{PRICES['40']} ₽</s> <b>{int(round(PRICES['40']*0.9))} ₽</b>\n"
-                    f"• 70 генераций — <s>{PRICES['70']} ₽</s> <b>{int(round(PRICES['70']*0.9))} ₽</b>\n\n"
-                    "Выбери пакет — и сразу перейдём к загрузке фото."
+                    f"• 20 — <s>{PRICES['20']} ₽</s> <b>{int(round(PRICES['20']*0.9))} ₽</b>\n"
+                    f"• 40 — <s>{PRICES['40']} ₽</s> <b>{int(round(PRICES['40']*0.9))} ₽</b>\n"
+                    f"• 70 — <s>{PRICES['70']} ₽</s> <b>{int(round(PRICES['70']*0.9))} ₽</b>\n"
                 )
             else:
                 text = (
                     "💎 <b>Тарифы генераций</b>\n\n"
-                    f"• 20 генераций — <b>{PRICES['20']} ₽</b>\n"
-                    f"• 40 генераций — <b>{PRICES['40']} ₽</b>\n"
-                    f"• 70 генераций — <b>{PRICES['70']} ₽</b>\n\n"
-                    "Выбери пакет — и сразу перейдём к загрузке фото."
+                    f"• 20 — <b>{PRICES['20']} ₽</b>\n"
+                    f"• 40 — <b>{PRICES['40']} ₽</b>\n"
+                    f"• 70 — <b>{PRICES['70']} ₽</b>\n"
                 )
             await safe_edit(q, text, reply_markup=self.kb_tariffs(discounted), parse_mode=ParseMode.HTML)
             return
@@ -299,12 +252,10 @@ class TgApp:
             if st.referred_by:
                 price = int(round(price * 0.9))
 
-            # MOCK-оплата
             st.balance += qty
             st.paid_any = True
             save_user(st)
 
-            # реф-начисления 20%
             if st.referred_by:
                 ref = get_user(st.referred_by)
                 ref_gain = round(price * 0.20, 2)
@@ -314,158 +265,117 @@ class TgApp:
 
             await safe_edit(
                 q,
-                f"✅ <b>Оплата прошла успешно!</b>\n\n"
-                f"Начислено на баланс: <b>{qty}</b> генераций.\n\n"
-                "Дальше нам нужны твои фото, чтобы обучить модель.\n"
-                "Пожалуйста, внимательно прочитай требования ниже 👇",
+                f"✅ Оплата прошла. Начислено: <b>{qty}</b> генераций.\n\n"
+                "Теперь загрузи 15–50 фото для обучения модели.\n"
+                "Когда закончишь — нажми «Фото загружены».",
                 parse_mode=ParseMode.HTML
             )
             await self._send_requirements(uid, context)
             return
 
         if data == "photos_done":
-            await safe_edit(q, "🚀 Обучение запущено!\n\nЭто может занять <b>10–30 минут</b>. Мы напишем, когда всё будет готово.", parse_mode=ParseMode.HTML)
+            await safe_edit(q, "🚀 Обучение запущено!\n\nЭто может занять <b>10–30 минут</b>. Напишем, когда всё будет готово.", parse_mode=ParseMode.HTML)
             asyncio.create_task(self._launch_training_and_wait(uid, context))
             return
 
         if data == "gen_menu":
             if not st.paid_any:
-                await safe_edit(
-                    q,
-                    "🖼 <b>Генерации</b>\n\nСначала приобретите пакет генераций.",
-                    reply_markup=self.kb_buy_or_back(), parse_mode=ParseMode.HTML
-                )
+                await safe_edit(q, "Сначала приобретите пакет генераций.", reply_markup=self.kb_buy_or_back())
                 return
             if not st.has_model:
-                await safe_edit(q, "⏳ Модель обучается. Мы пришлём уведомление, как только всё будет готово.")
+                await safe_edit(q, "⏳ Модель ещё обучается. Напишем, когда будет готово.")
                 return
-            await safe_edit(q, "Выберите тему:", reply_markup=self.kb_prompts())
+            await safe_edit(q, "Выбери стиль:", reply_markup=self.kb_prompt_single())
             return
 
-        if data in PROMPTS:
+        if data == PROMPT_ID:
             if st.balance < 3:
-                await safe_edit(
-                    q,
-                    "😕 У вас нет доступных генераций.\n\nПриобретите пакет — и продолжим.",
-                    reply_markup=self.kb_buy_or_back()
-                )
+                await safe_edit(q, "Нет доступных генераций. Пополните баланс.", reply_markup=self.kb_buy_or_back())
                 return
-            prompt_text = PROMPTS[data]
             await safe_edit(q, "🎨 Генерируем 3 изображения… это займёт ~30–60 секунд.")
             try:
-                imgs = await self._generate(uid, st.job_id, prompt_text, 3)
+                imgs = await self._generate(uid, st.job_id, PROMPT_TEXT, 3)
             except Exception:
-                await context.bot.send_message(chat_id=uid, text="❌ Упс, произошла ошибка при генерации. Попробуйте ещё раз.")
+                await context.bot.send_message(chat_id=uid, text="❌ Ошибка при генерации. Попробуйте ещё раз.")
                 return
 
             st.balance -= 3
             save_user(st)
 
-            media = [InputMediaPhoto(imgs[0], caption=f"Готово! Баланс: {st.balance}")] + \
-                    [InputMediaPhoto(u) for u in imgs[1:]]
+            media = [InputMediaPhoto(imgs[0], caption=f"Готово! Баланс: {st.balance}")] + [InputMediaPhoto(u) for u in imgs[1:]]
             await context.bot.send_media_group(chat_id=uid, media=media)
-            await context.bot.send_message(chat_id=uid, text="Хочешь другую тему? Выбери ещё:", reply_markup=self.kb_prompts())
+            await context.bot.send_message(chat_id=uid, text="Сгенерировать ещё?", reply_markup=self.kb_prompt_single())
             return
 
         if data == "examples":
             await safe_edit(
                 q,
-                "📸 Примеры работ\n\nПодписывайся на наш канал с примерами и вдохновением:\n@PhotoFly_Examples",
+                "📸 Примеры работ: @PhotoFly_Examples",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("Открыть канал", url="https://t.me/PhotoFly_Examples")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
                 ])
-            )
-            return
+            ); return
 
         if data == "support":
             await safe_edit(
                 q,
-                "🆘 <b>Поддержка</b>\n\nЕсли возник вопрос — мы на связи: @photofly_ai\n\nПишите коротко и по делу — так быстрее поможем.",
+                "🆘 Поддержка: @photofly_ai",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("Написать в поддержку", url="https://t.me/photofly_ai")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
                 ]),
                 parse_mode=ParseMode.HTML
-            )
-            return
+            ); return
 
         if data == "account":
             text = (
                 "👤 <b>Мой аккаунт</b>\n\n"
-                f"• Ваш ID в боте: <code>{uid}</code>\n"
-                f"• Доступно генераций: <b>{st.balance}</b>\n\n"
-                "Нужны ещё генерации? Откройте раздел «🎯 Попробовать»."
+                f"ID: <code>{uid}</code>\n"
+                f"Генераций доступно: <b>{st.balance}</b>\n"
+                f"Модель обучена: <b>{'да' if st.has_model else 'нет'}</b>"
             )
-            await safe_edit(q, text, reply_markup=self.kb_home(has_paid=st.paid_any), parse_mode=ParseMode.HTML)
-            return
+            await safe_edit(q, text, reply_markup=self.kb_home(has_paid=st.paid_any), parse_mode=ParseMode.HTML); return
 
         if data == "ref_menu":
             link = f"https://t.me/{(await context.bot.get_me()).username}?start={st.ref_code}"
             text = (
-                "🤝 <b>Реферальная программа</b>\n\n"
-                "• Делись своей ссылкой — получай <b>20%</b> с покупок друзей\n"
-                "• Друзьям — <b>скидка 10%</b> на первый заказ\n"
-                "• Вывод средств от <b>500 ₽</b>\n\n"
+                "🤝 <b>Реферальная программа</b>\n"
+                "• 20% с покупок друзей\n• друзьям −10% на первый заказ\n"
                 f"Твоя ссылка:\n<code>{link}</code>"
             )
-            await safe_edit(q, text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML)
-            return
+            await safe_edit(q, text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
 
         if data == "ref_income":
             text = (
                 "📈 <b>Мои доходы</b>\n\n"
-                f"Заработано всего: <b>{st.ref_earn_total:.2f} ₽</b>\n"
-                f"Доступно к выводу: <b>{st.ref_earn_ready:.2f} ₽</b>\n"
-                f"Выплачено: <b>{st.ref_earn_total - st.ref_earn_ready:.2f} ₽</b>\n\n"
-                "Минимальная сумма вывода: <b>500 ₽</b>."
+                f"Всего: <b>{get_user(uid).ref_earn_total:.2f} ₽</b>\n"
+                f"Доступно к выводу: <b>{get_user(uid).ref_earn_ready:.2f} ₽</b>\n"
+                "Минимум к выводу: 500 ₽."
             )
-            await safe_edit(q, text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML)
-            return
+            await safe_edit(q, text, reply_markup=self.kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
 
         if data == "ref_list":
-            await safe_edit(
-                q,
-                "👥 <b>Мои рефералы</b>\n\n"
-                "Список и детали покупок появятся здесь.\n"
-                "Пока что эта секция в минимальной версии.",
-                reply_markup=self.kb_ref_menu(uid),
-                parse_mode=ParseMode.HTML
-            )
-            return
+            await safe_edit(q, "Список рефералов появится позже.", reply_markup=self.kb_ref_menu(uid)); return
 
         if data == "ref_payout":
             await safe_edit(
                 q,
-                "💳 <b>Вывод средств</b>\n\n"
-                "Пожалуйста, напиши нам @photofly_ai — укажи:\n"
-                "• сумму к выводу\n• свой @ник и ID в боте\n"
-                "• удобный способ получения\n\n"
-                "⚠️ Вывод доступен от <b>500 ₽</b>.",
+                "Напиши @photofly_ai для вывода средств (от 500 ₽).",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("Написать поддержку", url="https://t.me/photofly_ai")],
                     [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
-                ]),
-                parse_mode=ParseMode.HTML
-            )
-            return
+                ])
+            ); return
 
         if data == "buy_flash_50":
-            st.balance += FLASH_OFFER["qty"]
-            st.paid_any = True
-            save_user(st)
-            await safe_edit(
-                q,
-                f"✅ <b>Готово!</b> Начислено <b>{FLASH_OFFER['qty']}</b> генераций за <b>{FLASH_OFFER['price']} ₽</b>.\n\n"
-                "Загружай фото — мы обучим модель и начнём творить!",
-                parse_mode=ParseMode.HTML
-            )
-            await self._send_requirements(uid, context)
-            return
+            st.balance += FLASH_OFFER["qty"]; st.paid_any = True; save_user(st)
+            await safe_edit(q, f"✅ Начислено {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.", parse_mode=ParseMode.HTML)
+            await self._send_requirements(uid, context); return
 
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
-        _ = get_user(uid)  # если не было — создаст
+        _ = get_user(uid)
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         local_path = os.path.join(PHOTOS_TMP, f"{uid}_{int(time.time())}.jpg")
@@ -479,73 +389,58 @@ class TgApp:
                     r = await cl.post(f"{BACKEND_ROOT}/api/upload_photo", data=data, files=files)
                     r.raise_for_status()
         except Exception:
-            await update.effective_message.reply_text("⚠️ Не удалось загрузить фото. Повтори ещё раз, пожалуйста.")
+            await update.effective_message.reply_text("⚠️ Не удалось загрузить фото. Повтори ещё раз.")
             return
 
         await update.effective_message.reply_text("Фото принято ✅\nЗагрузи ещё и нажми «Фото загружены», когда будешь готов.")
 
-    # -------------- HELPERS --------------
+    # ---------- HELPERS ----------
     async def _send_requirements(self, uid: int, context: ContextTypes.DEFAULT_TYPE):
         text = (
-            "📥 <b>Загрузка фото для обучения</b>\n\n"
-            "Загрузи <b>от 15 до 50</b> фотографий, где тебя хорошо видно. Лучше — 25–35 шт., разные ракурсы и сцены.\n\n"
-            "<b>Требования:</b>\n"
-            "• без очков, масок, кепок и сильных аксессуаров\n"
-            "• без тяжёлых фильтров/ретуши, без коллажей\n"
-            "• лицо и плечи — чётко; разные эмоции и свет\n"
-            "• вертикальные кадры предпочтительнее (но не критично)\n"
-            "• можно селфи и фото в полный рост\n"
-            "• избегай размытия и пересвета\n\n"
-            "Когда закончишь загрузку, нажми кнопку ниже 👇"
+            "📥 Загрузка фото для обучения\n\n"
+            "Загрузи 15–50 фотографий (лучше 25–35), разные ракурсы и сцены.\n"
+            "Когда закончишь — нажми «Фото загружены»."
         )
         await context.bot.send_message(chat_id=uid, text=text, reply_markup=self.kb_upload_fixed(), parse_mode=ParseMode.HTML)
 
     async def _launch_training_and_wait(self, uid: int, context: ContextTypes.DEFAULT_TYPE):
         try:
             async with httpx.AsyncClient(timeout=180) as cl:
-                data = {"user_id": str(uid)}
-                r = await cl.post(f"{BACKEND_ROOT}/api/train", data=data)
+                r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": str(uid)})
                 r.raise_for_status()
-                train_data = r.json()
-                job_id = train_data.get("job_id")
+                job_id = r.json().get("job_id")
                 if not job_id:
                     raise RuntimeError("no job_id from backend")
         except Exception:
             await context.bot.send_message(chat_id=uid, text="❌ Не удалось запустить обучение. Попробуйте ещё раз.")
             return
 
-        st = get_user(uid)
-        st.job_id = job_id
-        save_user(st)
+        st = get_user(uid); st.job_id = job_id; save_user(st)
 
         status_url = f"{BACKEND_ROOT}/api/status/{job_id}"
         for _ in range(300):
             try:
                 async with httpx.AsyncClient(timeout=30) as cl:
-                    rr = await cl.get(status_url)
-                    rr.raise_for_status()
+                    rr = await cl.get(status_url); rr.raise_for_status()
                     dd = rr.json()
                     status = (dd.get("status") or "").lower()
-                    if status in ("succeeded", "completed", "complete"):
+                    model_id = dd.get("model_id")
+                    if model_id:
                         st.has_model = True
                         save_user(st)
                         break
                     if status in ("failed", "canceled", "cancelled", "error"):
-                        await context.bot.send_message(chat_id=uid, text="❌ Обучение не удалось. Попробуйте ещё раз загрузить фото.")
+                        await context.bot.send_message(chat_id=uid, text="❌ Обучение не удалось. Попробуйте ещё раз.")
                         return
             except Exception:
                 pass
             await asyncio.sleep(2)
 
         if not st.has_model:
-            await context.bot.send_message(chat_id=uid, text="❌ Время ожидания вышло. Попробуйте ещё раз позже.")
+            await context.bot.send_message(chat_id=uid, text="❌ Время ожидания вышло. Попробуйте позже.")
             return
 
-        await context.bot.send_message(
-            chat_id=uid,
-            text="✨ <b>Готово!</b> Модель обучена.\n\nВыбери тему — сгенерим сразу 3 варианта.",
-            reply_markup=self.kb_prompts(), parse_mode=ParseMode.HTML
-        )
+        await context.bot.send_message(chat_id=uid, text="✨ Готово! Модель обучена.\nВыбери стиль:", reply_markup=self.kb_prompt_single())
 
     async def _generate(self, uid: int, job_id: Optional[str], prompt: str, n: int) -> List[str]:
         body = {"user_id": str(uid), "prompt": prompt, "num_images": n}
@@ -560,7 +455,7 @@ class TgApp:
                 raise RuntimeError("empty images")
             return urls
 
-    # ---------- FLASH OFFER SCHEDULER (24h) ----------
+    # ---------- FLASH OFFER ----------
     async def _flash_offer_scheduler(self):
         while True:
             now = time.time()
@@ -578,57 +473,36 @@ class TgApp:
             await asyncio.sleep(1800)
 
     async def _send_flash_offer(self, uid: int):
-        text = (
-            f"🔥 <b>Только сейчас!</b>\n\n"
-            f"Вам доступно <b>{FLASH_OFFER['qty']} генераций</b> за <b>{FLASH_OFFER['price']} ₽</b>.\n"
-            "Предложение ограничено по времени.\n\n"
-            "Нажмите ниже, чтобы приобрести и перейти к загрузке фото."
-        )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🛒 Приобрести", callback_data="buy_flash_50")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
         ])
         try:
-            await self.app.bot.send_message(chat_id=uid, text=text, reply_markup=kb, parse_mode=ParseMode.HTML)
+            await self.app.bot.send_message(chat_id=uid, text=f"🔥 Только сейчас! {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.", reply_markup=kb)
         except Exception:
             pass
 
 # ========= ГЛОБАЛЬНЫЕ ЛОГ/ОШИБКИ =========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # Игнорируем «просроченные» callback-и, чтобы не валить процесс
     msg = str(getattr(context, "error", ""))
-    if (
-        "query is too old" in msg
-        or "query ID is invalid" in msg
-        or "response timeout expired" in msg
-    ):
+    if ("query is too old" in msg) or ("query ID is invalid" in msg) or ("response timeout expired" in msg):
         log.warning(f"Ignored old callback error: {msg}")
         return
-
     log.exception("Unhandled error in handler", exc_info=context.error)
     try:
         if isinstance(update, Update) and update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ Упс, произошла ошибка. Уже чиним. Попробуйте ещё раз."
-            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Упс, произошла ошибка. Уже чиним.")
     except Exception:
         pass
 
 async def log_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kind = (
-        "callback_query" if update.callback_query else
-        "message" if update.message else
-        "channel_post" if update.channel_post else
-        "other"
-    )
+    kind = ("callback_query" if update.callback_query else "message" if update.message else "channel_post" if update.channel_post else "other")
     uid = update.effective_user.id if update.effective_user else "-"
     log.info(f"Update: kind={kind} from={uid}")
 
 # ========= EXPORT =========
 tg_app = TgApp()
 
-# (опционально) централизованный инициализатор — main.py его не использует, но пусть будет
 _init_started = False
 async def ensure_initialized() -> None:
     global _init_started
