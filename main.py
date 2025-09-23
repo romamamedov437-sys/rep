@@ -18,24 +18,19 @@ BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 
 REPLICATE_API_TOKEN = (os.getenv("REPLICATE_API_TOKEN") or "").strip()
 
-# Тренер fast-flux-trainer
+# тренер
 REPLICATE_TRAIN_OWNER = os.getenv("REPLICATE_TRAIN_OWNER", "replicate").strip()
 REPLICATE_TRAIN_MODEL = os.getenv("REPLICATE_TRAIN_MODEL", "fast-flux-trainer").strip()
 
-# ❗ Фиксированная ДЛИННАЯ версия (commit) fast-flux-trainer
+# фиксированная версия тренера
 FAST_FLUX_VERSION_FIXED = "replicate/fast-flux-trainer:8b10794665aed907bb98a1a5324cd1d3a8bea0e9b31e65210967fb9c9e2e08ed"
 
 REPLICATE_USERNAME = (os.getenv("REPLICATE_USERNAME") or "").strip()
-
-# qwen-путь (не используется сейчас)
-REPLICATE_TRAINER_VERSION_ID = (os.getenv("REPLICATE_TRAINER_VERSION_ID") or "").strip()
 TRAIN_STEPS_DEFAULT = int(os.getenv("TRAIN_STEPS_DEFAULT", "800"))
 
 # ---------- ГЕНЕРАЦИЯ ----------
 REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/flux-1.1-dev").strip()
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
-
-# Модель-фолбэк, если указанная вернёт 404/400
 FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 
 logging.basicConfig(level=logging.INFO)
@@ -44,7 +39,6 @@ log = logging.getLogger("web")
 # ---------- APP ----------
 app = FastAPI()
 
-# storage
 BASE_DIR = "/opt/render/project/src"
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_DIR = os.path.join(DATA_DIR, "users")
@@ -178,14 +172,8 @@ def _extract_version_hash_from_pointer(pointer: str) -> str:
         return pointer.split(":")[-1].strip()
     return pointer.strip()
 
-# ---- ЗАПУСК ТРЕНИРОВКИ (надёжный с fallbacks) ----
+# ---- ТРЕНИРОВКА ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
-    """
-    Порядок попыток:
-      1) POST https://api.replicate.com/v1/trainings
-      2) POST https://api.replicate.com/v1/models/{owner}/{model}/trainings
-      3) POST https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings
-    """
     if not REPLICATE_API_TOKEN:
         raise HTTPException(500, detail="REPLICATE_API_TOKEN not set")
 
@@ -208,37 +196,29 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
     DESTINATION_MODEL = "romamamedov437-sys/user-6064931063-lora"
 
     urls_and_payloads: List[Dict[str, Any]] = []
-
     p1: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input), "destination": DESTINATION_MODEL}
     urls_and_payloads.append({"url": "https://api.replicate.com/v1/trainings", "payload": p1})
-
     p2: Dict[str, Any] = {"version": version_pointer, "input": dict(base_input), "destination": DESTINATION_MODEL}
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/trainings", "payload": p2})
-
     p3: Dict[str, Any] = {"input": dict(base_input), "destination": DESTINATION_MODEL}
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings", "payload": p3})
 
     async with httpx.AsyncClient(timeout=180) as cl:
-        last_text = ""
-        last_code = 0
+        last_text, last_code = "", 0
         for attempt, item in enumerate(urls_and_payloads, 1):
-            url = item["url"]
-            payload = item["payload"]
             try:
-                r = await cl.post(url, headers=headers, json=payload)
+                r = await cl.post(item["url"], headers=headers, json=item["payload"])
                 if r.status_code >= 400:
                     log.error("Replicate TRAIN attempt %d failed %s: %s", attempt, r.status_code, r.text)
                 r.raise_for_status()
                 return r.json()
             except httpx.HTTPStatusError as e:
-                last_text = e.response.text
-                last_code = e.response.status_code
+                last_text, last_code = e.response.text, e.response.status_code
                 if last_code == 404:
                     continue
                 raise HTTPException(status_code=500, detail=f"replicate train failed ({last_code}): {last_text}")
             except Exception as e:
-                last_text = repr(e)
-                last_code = 0
+                last_text, last_code = repr(e), 0
                 continue
 
     raise HTTPException(status_code=500, detail=f"replicate train failed (exhausted urls), last={last_code} {last_text}")
@@ -253,7 +233,7 @@ async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
         r.raise_for_status()
         return r.json()
 
-# ------------- ГЕНЕРАЦИЯ (надёжная с авто-подбором version) -------------
+# ------------- ГЕНЕРАЦИЯ -------------
 def _split_model_and_version(model_path: str) -> Tuple[str, Optional[str]]:
     model_path = (model_path or "").strip()
     if ":" in model_path:
@@ -354,7 +334,13 @@ async def api_train(user_id: str = Form(...)):
         raise HTTPException(status_code=500, detail="no training_id from replicate")
 
     job_id = f"job_{uuid.uuid4().hex[:8]}"
-    jobs[job_id] = {"status": "running", "progress": 5, "user_id": user_id, "training_id": training_id, "model_id": None}
+    jobs[job_id] = {
+        "status": "running",
+        "progress": 5,
+        "user_id": user_id,
+        "training_id": training_id,
+        "model_id": None
+    }
     log.info(f"TRAIN started job={job_id} training_id={training_id} user={user_id}")
     return {"job_id": job_id, "status": "started"}
 
@@ -370,7 +356,8 @@ async def api_status(job_id: str):
             st = await get_replicate_training_status(training_id)
             state = st.get("status") or st.get("state")
             out = st.get("output") or {}
-            model = out.get("model") or out.get("id") or st.get("destination")
+            # важный фикс: у fast-flux-trainer модель лежит в output.version
+            model = out.get("version") or out.get("model") or out.get("id") or st.get("destination")
             if state:
                 j["status"] = state
                 j["progress"] = _pct_from_replicate_status(state)
@@ -380,6 +367,14 @@ async def api_status(job_id: str):
             logging.getLogger("web").warning(f"status fetch failed for {job_id}: {e!r}")
 
     return {"job_id": job_id, "status": j.get("status"), "progress": j.get("progress", 0), "model_id": j.get("model_id")}
+
+@app.post("/api/ggenerate")  # старый роут оставляем как синоним
+async def api_generate_alias(request: Request,
+                             user_id: Optional[str] = Form(None),
+                             prompt: Optional[str] = Form(None),
+                             num_images: Optional[int] = Form(None),
+                             job_id: Optional[str] = Form(None)):
+    return await api_generate(request, user_id, prompt, num_images, job_id)
 
 @app.post("/api/generate")
 async def api_generate(
