@@ -5,7 +5,7 @@ import time
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 import httpx
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
@@ -24,121 +24,142 @@ PHOTOS_TMP = os.path.join(DATA_DIR, "tg_tmp")
 os.makedirs(PHOTOS_TMP, exist_ok=True)
 
 PRICES = {"20": 429, "40": 590, "70": 719}
-FLASH_OFFER = {"qty": 50, "price": 379}
 
-# ---------- PROMPTS ----------
-# базовый реалистичный «клей» для фотореализма
-BASE_REAL = (
-    "Ultra-photorealistic, DSLR look, natural skin texture (visible pores, micro-blemishes), "
-    "subtle film grain, cinematic color grading, soft falloff, correct perspective, "
-    "accurate shadows, realistic reflections, no plastic smoothing, 50mm f/1.8 depth-of-field."
-)
+# ⚡ Акция через 24 часа после первого входа
+FLASH_OFFER = {"qty": 50, "price": 390}  # 50 генераций — 390₽
 
-# 20 мужских — по 5–7 в стиле
-MEN_CATALOG: Dict[str, List[str]] = {
-    "Бизнес / офис": [
-        "Hyper-realistic portrait of a confident man in a glass-corner boardroom at golden hour, navy polo, beige tailored trousers, suede loafers, Rolex steel on wrist, skyline bokeh behind; seated in leather armchair, relaxed posture; whiskey decanter on side table; " + BASE_REAL,
-        "Executive portrait in a marble lobby with floor-to-ceiling windows, charcoal suit without tie, pocket square, subtle cufflinks, hands loosely clasped; soft rim light from windows; " + BASE_REAL,
-        "Close-up half-body portrait in a minimal CEO office, matte black shelves, a single bonsai, silver laptop closed; crisp white oxford shirt, open collar; contemplative look; " + BASE_REAL,
-        "Standing near panoramic window in private office, city sunset haze outside, brown cashmere blazer over knit polo, leather belt, watch peeking; hands in pockets; " + BASE_REAL,
-        "Seated at modern conference table, tablet and pen neatly aligned, neutral tones, soft overhead practicals; gentle smile; " + BASE_REAL,
-    ],
-    "Лакшери интерьер": [
-        "Man lounging on low velvet sofa in penthouse lounge, dark wood, brass accents, warm practical lamps, muted skyline; black knit polo, tailored trousers; " + BASE_REAL,
-        "Full-body portrait beside grand bookshelf with art books, textured plaster wall, herringbone wood floor; cream cashmere sweater over shoulders; " + BASE_REAL,
-        "Portrait at a private bar with backlit crystal, amber reflections on face, dark polo; hands around glass tumbler (no logo); " + BASE_REAL,
-        "Man leaning on marble kitchen island, integrated lighting under cabinets, soft specular highlights; open collar shirt, sleeves rolled; " + BASE_REAL,
-        "Seated in Eames lounge chair by window, leg crossed, watch detail sharp, city bokeh; " + BASE_REAL,
-    ],
-    "Casual город / улица": [
-        "Street portrait near modern skyscrapers at blue hour, denim jacket over tee, subtle traffic bokeh, light drizzle sheen on asphalt; " + BASE_REAL,
-        "Urban rooftop at sunset, wind in short hair, bomber jacket, minimal jewelry, muted skyline; " + BASE_REAL,
-        "Concrete staircase with soft side light, monochrome palette, relaxed stance, hands in pockets; " + BASE_REAL,
-        "Underpass with soft reflected light, techwear jacket, neon hints on wet ground; " + BASE_REAL,
-        "Brick alleyway with shallow DOF, casual polo, gentle smile, authentic skin texture; " + BASE_REAL,
-    ],
-    "Спорт / улица": [
-        "Athletic portrait on riverside promenade at dawn, track jacket half-zipped, cool mist, subtle breath in air; " + BASE_REAL,
-        "Fitness look in minimalist gym, matte equipment, window light key, chalk dust particles; " + BASE_REAL,
-        "Runner tying laces on city steps, early sunlight rim, motion-ready stance; " + BASE_REAL,
-        "Casual bike near modern bridge, cross-body bag, wind ripples on water, soft highlights; " + BASE_REAL,
-        "Outdoor portrait in city park, clean hoodie, realistic fabric folds, natural greenery bokeh; " + BASE_REAL,
-    ],
+# ================== PROMPTS (Ровно как ты прислал) ==================
+# 40 for MEN, 250 for WOMEN (grouped by style/theme) — ключи локализованы в заголовках меню,
+# сами строки промптов оставлены без изменений.
+
+PROMPTS_SOURCE = {
+    "men": {
+        "business": [
+            "A confident businessman standing in front of Moscow City skyscrapers, wearing a tailored navy blue suit, polished black shoes, and a luxury wristwatch, captured with a Canon EOS R5 and 85mm f/1.2 lens, golden hour lighting reflecting on glass towers, highly realistic photo with natural skin texture.",
+            "A successful man walking in Wall Street, New York, holding a leather briefcase, dressed in a charcoal grey suit and silk tie, cinematic composition, shallow depth of field, realistic photo with professional studio lighting.",
+            "A corporate executive posing inside a modern office with panoramic windows, background showing London skyline, sunlight streaming in, Leica SL2-S shot with 50mm f/1.4 lens, detailed skin tones, hyperrealistic style.",
+            "A charismatic entrepreneur leaning on a luxury black car in Dubai, wearing a crisp white shirt, slim fit trousers, expensive shoes, captured with Sony A7R IV, sunset desert vibes, photorealism emphasized.",
+            "A serious businessman working on a laptop in a rooftop lounge, Shanghai skyline in the background, soft evening light, shallow DOF, professional portrait with rich colors and cinematic tone."
+        ],
+        "fitness": [
+            "A muscular man lifting weights in a modern luxury gym in Dubai, sweat glistening on skin, detailed muscle definition, shot with Canon EOS R5, 35mm lens, studio lighting, ultra-realistic.",
+            "A runner training on a Moscow street during winter morning, breath visible in the cold air, wearing sportswear, shot on Sony A7R IV, cinematic tone, photorealistic capture.",
+            "A man practicing yoga on a rooftop in New York, Manhattan skyline behind him, sunrise golden light, 50mm lens, cinematic composition, realistic atmosphere.",
+            "A boxer in a dimly lit training ring, sweat dripping, veins visible, high-contrast dramatic lighting, ultra-detailed realistic photo, Leica SL2.",
+            "A swimmer walking out of the pool in Dubai luxury sports complex, water dripping off body, reflections in the water, Canon EOS R5, natural look, cinematic detail."
+        ],
+        "luxury lifestyle": [
+            "A stylish man relaxing on a luxury villa terrace in Bali, infinity pool behind him, wearing designer sunglasses and linen shirt, cinematic golden hour, ultra-realistic.",
+            "A man posing with a Lamborghini Aventador in Monaco, wearing black tuxedo, city lights reflecting in the car paint, cinematic hyperrealism, Leica 90mm lens.",
+            "A man sitting inside a private jet, drinking champagne, dressed in designer clothes, cinematic luxury shot with Sony A7R IV, detailed textures, photorealistic realism.",
+            "A rich businessman holding a glass of whiskey inside a skyscraper penthouse in Dubai, background city lights blurred, ultra-detailed realistic photo, professional lighting.",
+            "A young man showing off dollar bills in front of a Ferrari, nighttime city background, cinematic neon lighting, ultra-realistic shot."
+        ],
+        "travel": [
+            "A man exploring the streets of Paris, Eiffel Tower visible in the distance, casual outfit, DSLR realistic photo, cinematic atmosphere.",
+            "A man standing on Brooklyn Bridge, New York, sunset lighting, wearing a leather jacket, photorealistic image with shallow DOF.",
+            "A man hiking in the Swiss Alps, snow-capped mountains behind, cinematic natural light, Canon EOS R5 capture.",
+            "A man enjoying Turkish coffee in Istanbul with Hagia Sophia in the background, natural morning sunlight, ultra-realistic photo.",
+            "A man standing on a yacht in the Mediterranean, wind blowing his hair, dressed in linen shirt, photorealistic cinematic capture."
+        ],
+        "studio portrait": [
+            "A professional studio portrait of a man in a black suit, dark grey background, three-point lighting setup, hyperrealistic style with detailed textures.",
+            "A cinematic close-up of a man with a beard, dramatic Rembrandt lighting, ultra-realistic capture.",
+            "A man in traditional Arabic attire photographed in a studio with golden lighting, Canon EOS R5 85mm lens, cinematic hyperrealism.",
+            "A classic black-and-white studio portrait of a man in white shirt, sharp contrast lighting, realistic detail.",
+            "A headshot of a businessman in corporate attire, professional studio setup, ultra-detailed realistic photography."
+        ]
+    },
+    "women": {
+        "fashion": [
+            "A glamorous young woman walking in New York’s Fifth Avenue, wearing a designer red dress, holding a Louis Vuitton bag, cinematic shot with Canon EOS R5, golden hour lighting, highly detailed realistic textures, natural makeup with glossy lips, long straight hair styled to perfection.",
+            "A model posing in front of Moscow City skyscrapers, wearing black leather jacket, professional portrait shot with Sony A7R IV, dramatic cinematic lighting, natural skin textures, smoky eye makeup and bold accessories.",
+            "A woman wearing elegant evening gown in Dubai Marina, city lights reflecting on the water, photorealistic cinematic shot with Leica camera, flawless makeup and sparkling jewelry, detailed hairstyle.",
+            "A stylish woman in Paris posing under the Eiffel Tower, wearing beret and trench coat, ultra-realistic cinematic lighting, 50mm f/1.4 lens, fashionable handbag, soft glowing skin detail.",
+            "A fashion portrait of a woman in Milan, standing near Duomo cathedral, wearing luxury clothes, photorealistic photography, styled hair, luxury earrings, glossy makeup finish."
+        ],
+        "beach": [
+            "A woman in bikini on Maldives beach, turquoise ocean behind her, golden hour light, Canon EOS R5, photorealistic detail of skin and hair, wet hair effect, shining skin tones.",
+            "A woman walking along Miami Beach at sunrise, holding sandals in hand, cinematic realism, Sony A7R IV capture, natural wind in her hair, minimal makeup, detailed sand textures.",
+            "A model lying on a beach towel in Bali, palm trees swaying in the background, cinematic hyperrealism, Leica 50mm lens, stylish sunglasses and glowing tan skin.",
+            "A woman in summer dress near the sea in Santorini, Greece, white buildings and blue domes behind her, cinematic lighting, long flowing hair, stylish jewelry, photorealistic texture.",
+            "A woman posing in a luxury infinity pool overlooking ocean, reflections in water, photorealistic capture, shining wet hair, luxury gold necklace, hyperrealistic realism."
+        ],
+        "luxury lifestyle": [
+            "A glamorous woman posing with a Rolls-Royce in Dubai, wearing a gold evening gown, cinematic neon lights reflecting, ultra-realistic, sparkling earrings and luxury diamond ring visible.",
+            "A woman sitting inside a private jet, sipping champagne, dressed in luxury clothes, cinematic photorealism, high-end handbag on seat, detailed hair and makeup style.",
+            "A rich woman standing in front of her villa in Los Angeles, palm trees in background, golden hour light, ultra-realistic detail, luxury car visible behind, glowing skin.",
+            "A woman with Chanel bag walking near luxury yachts in Monaco, cinematic photography with shallow DOF, stylish high heels, elegant long hair blowing in wind.",
+            "A female entrepreneur sitting at a penthouse balcony in New York, skyscrapers behind, cinematic night lights, ultra-realistic photo, designer dress and gold necklace visible."
+        ],
+        "fitness": [
+            "A woman working out in luxury Dubai gym, sweat glistening on body, photorealistic ultra detail, tight sportswear, ponytail hair style, focused expression.",
+            "A runner girl training in Central Park, New York, cinematic golden hour, photorealism, stylish sports bra and leggings, glowing skin detail.",
+            "A yoga woman meditating on Bali cliff, ocean behind her, cinematic natural light, long braided hair, detailed realistic textures.",
+            "A female boxer training in dim gym, cinematic dramatic light, ultra-realistic photo, toned muscles, intense focus, sweat dripping on skin.",
+            "A swimmer walking out of pool in luxury sports complex, water dripping, photorealistic textures, slicked back wet hair, stylish sporty look."
+        ],
+        "party": [
+            "A woman dancing in night club with neon lights, photorealistic cinematic vibe, shiny black dress, styled hair, realistic glowing skin.",
+            "A glamorous girl posing with friends at rooftop party in Moscow, city lights behind, cinematic realism, holding champagne glass, makeup shining.",
+            "A woman in red dress celebrating in Dubai luxury club, champagne, cinematic light, elegant hairstyle, luxury necklace.",
+            "A stylish woman in New York bar, holding cocktail, cinematic realistic photography, detailed makeup and jewelry, hyperrealism.",
+            "A young woman with balloons in luxury villa party, photorealistic style, stylish short dress, glitter makeup visible."
+        ],
+        "travel": [
+            "A woman exploring Istanbul’s Grand Bazaar, colorful lights and carpets around, photorealistic cinematic capture, styled casual clothes, detailed skin textures.",
+            "A woman standing on Brooklyn Bridge, sunset golden hour, cinematic photorealism, long curly hair blowing, detailed makeup and photorealistic capture.",
+            "A female traveler with backpack in Swiss Alps, snow mountains behind, natural cinematic lighting, glowing skin, stylish outfit detail.",
+            "A woman enjoying coffee in Paris street café, Eiffel Tower blurred behind, ultra-realistic cinematic shot, natural makeup and stylish hair.",
+            "A woman on Venice gondola, romantic cinematic detail, hyperrealism, elegant summer dress, photorealistic detail."
+        ],
+        "studio portrait": [
+            "A professional beauty portrait of a woman in white dress, studio setup with soft lighting, photorealistic skin detail, glossy lips, luxury earrings.",
+            "A cinematic headshot of a woman with long hair, dramatic studio light, ultra-realistic, smoky eyes, glossy skin detail.",
+            "A close-up of woman face with natural makeup, Canon EOS R5, 85mm f/1.2 lens, hyperrealistic detail, styled eyelashes and lips.",
+            "A black-and-white portrait of woman in fashion pose, studio lighting, ultra-realistic textures, sharp cheekbone detail.",
+            "A fashion studio portrait with cinematic colors, photorealistic photography, detailed hairstyle and glowing skin."
+        ],
+        "luxury cars": [
+            "A glamorous woman posing next to a Lamborghini in Dubai, photorealistic cinematic detail, wearing luxury dress and heels.",
+            "A woman leaning on a Ferrari in Monaco, golden hour lighting, stylish black dress, photorealistic hyperrealism.",
+            "A stylish woman opening door of Rolls-Royce, cinematic lighting, luxury jewelry detail, photorealism.",
+            "A woman standing near Porsche on Los Angeles street, cinematic photo realism, stylish outfit.",
+            "A glamorous woman inside luxury car interior, photorealistic detail, expensive accessories visible."
+        ],
+        "villa lifestyle": [
+            "A woman enjoying luxury villa in Bali, infinity pool view, photorealistic golden hour, stylish outfit, glowing skin detail.",
+            "A woman relaxing in villa garden, cinematic sunlight, wearing summer dress, ultra-realistic photo.",
+            "A glamorous woman sitting on villa balcony in Santorini, sea behind her, styled fashion detail.",
+            "A woman posing with champagne near luxury villa pool, photorealistic textures, cinematic vibe.",
+            "A stylish woman enjoying breakfast at luxury villa terrace, photorealistic morning light."
+        ]
+    }
 }
 
-# 80 женских — по стилям (в каждом 5–7)
-WOMEN_CATALOG: Dict[str, List[str]] = {
-    "Fashion editorial": [
-        "Ultra-photorealistic portrait of a woman in a sunlit penthouse corner, silk blouse, tailored trousers, delicate gold earrings, soft backlight halo; " + BASE_REAL,
-        "Editorial portrait against textured plaster wall, minimalist styling, linen blazer draped over shoulders, gentle wind in hair; " + BASE_REAL,
-        "Runway-inspired pose near full-height window, monochrome outfit, subtle specular highlights on cheekbones; " + BASE_REAL,
-        "Sitting on marble bench, pleated midi skirt, leather belt, hand on knee, soft side light; " + BASE_REAL,
-        "Close-up beauty portrait with neutral makeup, fine baby hair flyaways retained, soft catchlights; " + BASE_REAL,
-        "Standing beside sculpture pedestal, gallery ambiance, soft spot, shadows accurate; " + BASE_REAL,
-        "Editorial three-quarter in hotel corridor, warm sconces, satin camisole under blazer; " + BASE_REAL,
-    ],
-    "Street style / город": [
-        "Ultra-photorealistic portrait of a woman on a cobblestone street at golden hour, trench coat, crossbody bag, soft breeze; " + BASE_REAL,
-        "City cafe terrace, latte on table, knit sweater, candid smile, bokeh pedestrians; " + BASE_REAL,
-        "Rooftop sunset, denim jacket over white tee, hair lit from behind, skyline haze; " + BASE_REAL,
-        "Underpass neon reflections on wet asphalt, oversized blazer, straight look to camera; " + BASE_REAL,
-        "Crosswalk mid-step, light motion blur in background, pleated skirt, sunlight streaks; " + BASE_REAL,
-    ],
-    "Studio beauty": [
-        "Ultra-photorealistic woman in studio, large softbox key, beauty dish fill, neutral grey seamless, natural skin texture, micro peach fuzz visible; " + BASE_REAL,
-        "Tight headshot, glossy lip, mascara detail, tiny skin imperfections preserved, no over-smoothing; " + BASE_REAL,
-        "Half-body seated on apple box, cotton tank, gentle shoulder highlight, subtle film grain; " + BASE_REAL,
-        "Profile portrait, rim light outlining hair, matte background; " + BASE_REAL,
-        "Three-quarter beauty shot, silk scarf around neck, gentle color gel accents; " + BASE_REAL,
-        "Close crop of eyes and cheekbones, catchlight reflection, pores visible; " + BASE_REAL,
-        "Studio portrait with negative fill on one side for depth; " + BASE_REAL,
-    ],
-    "Luxury interior": [
-        "Woman in luxury living room, velvet sofa, brass floor lamp, marble coffee table with glass carafe, silk blouse, soft warm key; " + BASE_REAL,
-        "Reading a book near panoramic window, city bokeh at dusk, knit dress, cozy but chic; " + BASE_REAL,
-        "Standing by grand bookshelf, cashmere cardigan, delicate necklace, soft rim; " + BASE_REAL,
-        "Sipping tea at marble kitchen island, pendant lights glowing, satin shirt; " + BASE_REAL,
-        "Seated at piano in private salon, minimal jewelry, elegant posture; " + BASE_REAL,
-        "By fireplace with stone surround, wool dress, warm practicals; " + BASE_REAL,
-        "On balcony with subtle wind, tailored blazer over camisole, skyline haze; " + BASE_REAL,
-    ],
-    "Nature / сад": [
-        "Woman in botanical garden, dappled sunlight through leaves, linen dress, true-to-life greens; " + BASE_REAL,
-        "Meadow at golden hour, backlit hair strands glowing, flowy dress, authentic lens flare; " + BASE_REAL,
-        "Forest path with soft fog, knit sweater, hands in pockets, grounded colors; " + BASE_REAL,
-        "By lakeshore rocks, wind and water texture realistic, denim overshirt; " + BASE_REAL,
-        "Among wildflowers, shallow DOF, natural freckles visible; " + BASE_REAL,
-        "Wooden pier at sunset, long skirt, cardigan, gentle smile; " + BASE_REAL,
-        "Orchard in bloom, basket with apples, cotton dress; " + BASE_REAL,
-    ],
-    "Travel / lifestyle": [
-        "Old European street, stone facades, espresso in hand, trench coat, candid glance; " + BASE_REAL,
-        "Hotel balcony view, silk robe, morning light, cup of coffee steam; " + BASE_REAL,
-        "Airport lounge minimalism, carry-on suitcase, knit set, soft cool lighting; " + BASE_REAL,
-        "Harbor promenade, linen set, sea breeze in hair, subdued colors; " + BASE_REAL,
-        "Desert overlook at sunset, shawl blowing, warm tones; " + BASE_REAL,
-        "Mountain viewpoint, puffer vest over sweater, rosy cheeks, crisp air; " + BASE_REAL,
-        "Beach boardwalk at blue hour, light cardigan, natural tan, subtle highlights; " + BASE_REAL,
-    ],
-    "Fitness / wellness": [
-        "Woman in clean boutique gym, matte dumbbells, window key light, seamless leggings and top, skin sheen realistic; " + BASE_REAL,
-        "Yoga studio with wooden floor, warm sunlight stripes, balanced pose, barefoot; " + BASE_REAL,
-        "Outdoor run at dawn, breathable jacket, mist, gentle breath visible; " + BASE_REAL,
-        "Pilates reformer studio, neutral palette, tidy lines; " + BASE_REAL,
-        "Stretching by large window, city haze backdrop; " + BASE_REAL,
-    ],
-    "Evening / party": [
-        "Cocktail bar with amber backlight, satin slip dress, soft speculars on glassware, confident gaze; " + BASE_REAL,
-        "Rooftop party blue hour, sequined blazer, hair moving in breeze, skyline bokeh; " + BASE_REAL,
-        "Hotel corridor with warm sconces, little black dress, elegant stride; " + BASE_REAL,
-        "Jazz lounge, velvet booth, martini glass, smokey ambience without haze; " + BASE_REAL,
-        "Neon sign reflection in window, tailored suit set, cinematic shadows; " + BASE_REAL,
-        "Private club library, dark wood, single lamp, pearl earrings; " + BASE_REAL,
-        "Chandelier foyer, silk gown, realistic reflections on polished floor; " + BASE_REAL,
-    ],
+# Локализация заголовков меню для категорий (русские названия + эмодзи)
+MEN_TITLES = {
+    "business": "💼 Бизнес / офис",
+    "fitness": "🏃‍♂️ Фитнес / спорт",
+    "luxury lifestyle": "🏙 Лакшери лайфстайл",
+    "travel": "✈️ Путешествия",
+    "studio portrait": "📷 Студийный портрет",
+}
+WOMEN_TITLES = {
+    "fashion": "👗 Fashion / мода",
+    "beach": "🏖 Пляж",
+    "luxury lifestyle": "💎 Лакшери лайфстайл",
+    "fitness": "🧘‍♀️ Фитнес / wellness",
+    "party": "🎉 Вечеринка / вечер",
+    "travel": "🧳 Путешествия",
+    "studio portrait": "📸 Студийный портрет",
+    "luxury cars": "🚗 Люкс-авто",
+    "villa lifestyle": "🏡 Вилла / lifestyle",
 }
 
-# подсчёт: 4 раздела мужчин (по 5) = 20, женщин 8 разделов (5–7 каждый) ≈ 80
+# Строим каталоги для кнопок
+MEN_CATALOG: Dict[str, List[str]] = {MEN_TITLES[k]: v for k, v in PROMPTS_SOURCE["men"].items()}
+WOMEN_CATALOG: Dict[str, List[str]] = {WOMEN_TITLES[k]: v for k, v in PROMPTS_SOURCE["women"].items()}
 
 # ================== LOG ==================
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -198,15 +219,16 @@ def kb_home(has_paid: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🖼 Генерации", callback_data="gen_menu")],
         [InlineKeyboardButton("👤 Мой аккаунт", callback_data="account")],
         [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_menu")],
+        [InlineKeyboardButton("📸 Примеры", callback_data="examples")],
         [InlineKeyboardButton("🆘 Поддержка", callback_data="support")],
     ])
 
 def kb_tariffs(discounted: bool = False) -> InlineKeyboardMarkup:
     def price(v): return int(round(v * 0.9)) if discounted else v
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"20 — {price(PRICES['20'])} ₽", callback_data="buy_20")],
-        [InlineKeyboardButton(f"40 — {price(PRICES['40'])} ₽", callback_data="buy_40")],
-        [InlineKeyboardButton(f"70 — {price(PRICES['70'])} ₽", callback_data="buy_70")],
+        [InlineKeyboardButton(f"20 генераций — {price(PRICES['20'])} ₽", callback_data="buy_20")],
+        [InlineKeyboardButton(f"40 генераций — {price(PRICES['40'])} ₽", callback_data="buy_40")],
+        [InlineKeyboardButton(f"70 генераций — {price(PRICES['70'])} ₽", callback_data="buy_70")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")],
     ])
 
@@ -225,7 +247,9 @@ def kb_gender() -> InlineKeyboardMarkup:
 
 def kb_categories(gender: str) -> InlineKeyboardMarkup:
     cats = list(MEN_CATALOG.keys()) if gender == "men" else list(WOMEN_CATALOG.keys())
-    rows = [[InlineKeyboardButton(f"{title}", callback_data=f"cat:{gender}:{title}") ] for title in cats]
+    rows: List[List[InlineKeyboardButton]] = []
+    for title in cats:
+        rows.append([InlineKeyboardButton(title, callback_data=f"cat:{gender}:{title}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="gen_menu")])
     return InlineKeyboardMarkup(rows)
 
@@ -248,6 +272,12 @@ def kb_ref_menu(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Мои доходы", callback_data="ref_income")],
         [InlineKeyboardButton("👥 Мои рефералы", callback_data="ref_list")],
         [InlineKeyboardButton("💳 Вывести средства", callback_data="ref_payout")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+    ])
+
+def kb_examples() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Открыть канал с примерами", url="https://t.me/PhotoFly_Examples")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
     ])
 
@@ -297,7 +327,7 @@ class TgApp:
         u = update.effective_user
         st = get_user(u.id)
 
-        # реф-код
+        # Реф-код
         if context.args:
             arg = context.args[0]
             if arg.startswith("ref_"):
@@ -311,7 +341,10 @@ class TgApp:
 
         text = (
             "👋 <b>Привет!</b> Это <b>PhotoFly</b> — персональная фотостудия с ИИ.\n\n"
-            "1) Покупаешь пакет\n2) Загружаешь 15–50 фото\n3) Мы обучаем модель и выдаём реалистичные портреты по темам."
+            "1) Покупаешь пакет генераций\n"
+            "2) Загружаешь 20–50 фото для обучения\n"
+            "3) Получаешь реалистичные портреты по темам и стилям\n\n"
+            "Нажми «🎯 Попробовать», чтобы выбрать тариф."
         )
         await update.effective_message.reply_text(text, reply_markup=kb_home(st.paid_any), parse_mode=ParseMode.HTML)
 
@@ -321,26 +354,34 @@ class TgApp:
         st = get_user(uid)
         data = q.data or ""
 
-        # навигация
+        # Навигация
         if data == "back_home":
             await q.message.reply_text("📍 Главное меню", reply_markup=kb_home(st.paid_any))
             return
+
+        if data == "examples":
+            await q.message.reply_text(
+                "📸 <b>Примеры работ</b>\n\nВдохновляйся готовыми результатами и выбирай свой стиль:",
+                reply_markup=kb_examples(), parse_mode=ParseMode.HTML
+            ); return
 
         if data == "try":
             discounted = bool(st.referred_by)
             if discounted:
                 text = (
-                    "💎 <b>Тарифы</b> <i>(скидка −10% по реф.ссылке)</i>\n\n"
-                    f"• 20 — <s>{PRICES['20']} ₽</s> <b>{int(round(PRICES['20']*0.9))} ₽</b>\n"
-                    f"• 40 — <s>{PRICES['40']} ₽</s> <b>{int(round(PRICES['40']*0.9))} ₽</b>\n"
-                    f"• 70 — <s>{PRICES['70']} ₽</s> <b>{int(round(PRICES['70']*0.9))} ₽</b>"
+                    "💎 <b>Тарифы генераций</b> <i>(−10% по реферальной ссылке)</i>\n\n"
+                    f"• 20 генераций — <s>{PRICES['20']} ₽</s> <b>{int(round(PRICES['20']*0.9))} ₽</b>\n"
+                    f"• 40 генераций — <s>{PRICES['40']} ₽</s> <b>{int(round(PRICES['40']*0.9))} ₽</b>\n"
+                    f"• 70 генераций — <s>{PRICES['70']} ₽</s> <b>{int(round(PRICES['70']*0.9))} ₽</b>\n\n"
+                    "Выбирай пакет и начинаем!"
                 )
             else:
                 text = (
-                    "💎 <b>Тарифы</b>\n\n"
-                    f"• 20 — <b>{PRICES['20']} ₽</b>\n"
-                    f"• 40 — <b>{PRICES['40']} ₽</b>\n"
-                    f"• 70 — <b>{PRICES['70']} ₽</b>"
+                    "💎 <b>Тарифы генераций</b>\n\n"
+                    f"• 20 генераций — <b>{PRICES['20']} ₽</b>\n"
+                    f"• 40 генераций — <b>{PRICES['40']} ₽</b>\n"
+                    f"• 70 генераций — <b>{PRICES['70']} ₽</b>\n\n"
+                    "Выбирай пакет и начинаем!"
                 )
             await q.message.reply_text(text, reply_markup=kb_tariffs(discounted), parse_mode=ParseMode.HTML)
             return
@@ -348,9 +389,14 @@ class TgApp:
         if data in ("buy_20", "buy_40", "buy_70"):
             qty = int(data.split("_")[1])
             price = PRICES[str(qty)]
-            if st.referred_by: price = int(round(price * 0.9))
-            st.balance += qty; st.paid_any = True; save_user(st)
+            if st.referred_by:
+                price = int(round(price * 0.9))
 
+            st.balance += qty
+            st.paid_any = True
+            save_user(st)
+
+            # Реф-начисления
             if st.referred_by:
                 ref = get_user(st.referred_by)
                 ref_gain = round(price * 0.20, 2)
@@ -358,14 +404,36 @@ class TgApp:
                 ref.ref_earn_ready += ref_gain
                 save_user(ref)
 
-            await q.message.reply_text(
-                f"✅ Оплата прошла. Начислено: <b>{qty}</b> генераций.\n\n"
-                "Теперь загрузи 15–50 фото (лучше 25–35). Когда закончишь — нажми «Фото загружены».",
-                reply_markup=kb_upload_fixed(), parse_mode=ParseMode.HTML
-            )
+            # Если модель уже есть — сразу в генерации (без просьбы загрузить фото)
+            if st.has_model:
+                await q.message.reply_text(
+                    f"✅ Оплата прошла. Начислено: <b>{qty}</b> генераций.\n\n"
+                    "Готово! Переходим к генерациям — выбери раздел:",
+                    reply_markup=kb_gender(), parse_mode=ParseMode.HTML
+                )
+            else:
+                # Нет модели — отправляем требования и кнопку «Фото загружены»
+                await q.message.reply_text(
+                    "✅ Оплата прошла. Начислено: <b>{qty}</b> генераций.\n\n"
+                    "📥 <b>Требования к фото для обучения</b>\n"
+                    "• От <b>20</b> до <b>50</b> фотографий (лучше 25–35)\n"
+                    "• Разные ракурсы: фронтально, 3/4, профиль, разные фоны и освещение\n"
+                    "• <b>Без</b> солнцезащитных очков, кепок/шапок, масок, сильных фильтров\n"
+                    "• Реальная мимика: с улыбкой и нейтрально\n"
+                    "• Чистые фото, без сильного шума и размытий\n\n"
+                    "Когда закончишь — нажми «Фото загружены».",
+                    reply_markup=kb_upload_fixed(), parse_mode=ParseMode.HTML
+                )
             return
 
         if data == "photos_done":
+            # Одна модель на аккаунт — повторно не запускаем
+            if st.has_model:
+                await q.message.reply_text(
+                    "ℹ️ На аккаунте уже есть обученная модель.\n"
+                    "Можем сразу перейти к генерациям:", reply_markup=kb_gender()
+                )
+                return
             await q.message.reply_text("🚀 Запускаем обучение. Сообщим, когда всё будет готово.")
             asyncio.create_task(self._launch_training_and_wait(uid, context))
             return
@@ -374,7 +442,7 @@ class TgApp:
             if not st.paid_any:
                 await q.message.reply_text("Сначала приобретите пакет.", reply_markup=kb_buy_or_back()); return
             if not st.has_model:
-                await q.message.reply_text("⏳ Модель ещё обучается. Мы напишем, когда она будет готова."); return
+                await q.message.reply_text("⏳ Модель ещё обучается или не создана. Мы напишем, когда она будет готова."); return
             await q.message.reply_text("Выбери раздел:", reply_markup=kb_gender()); return
 
         if data.startswith("g:"):
@@ -389,7 +457,8 @@ class TgApp:
         if data.startswith("p:"):
             _, gender, cat, idx = data.split(":")
             idx = int(idx)
-            prompt = (MEN_CATALOG if gender=="men" else WOMEN_CATALOG)[cat][idx]
+            items = MEN_CATALOG[cat] if gender == "men" else WOMEN_CATALOG[cat]
+            prompt = items[idx]
             if st.balance < 3:
                 await q.message.reply_text("Нет доступных генераций. Пополните баланс.", reply_markup=kb_buy_or_back()); return
             await q.message.reply_text("🎨 Генерируем 3 изображения… ~30–60 секунд.")
@@ -415,40 +484,90 @@ class TgApp:
             await q.message.reply_text(text, reply_markup=kb_home(st.paid_any), parse_mode=ParseMode.HTML); return
 
         if data == "support":
-            await q.message.reply_text("🆘 Поддержка: @photofly_ai"); return
+            await q.message.reply_text(
+                "🆘 <b>Поддержка</b>\n\n"
+                "• По вопросам оплаты и генераций: @photofly_ai\n"
+                "• График: ежедневно 10:00–22:00 (МСК)\n\n"
+                "Мы отвечаем быстро и по делу. Нажми «Назад», чтобы вернуться в меню.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]]),
+                parse_mode=ParseMode.HTML
+            ); return
 
         if data == "ref_menu":
             link = f"https://t.me/{(await context.bot.get_me()).username}?start={get_user(uid).ref_code}"
             text = (
-                "🤝 <b>Реферальная программа</b>\n"
-                "• 20% с покупок друзей\n• Друзьям −10% на первый заказ\n\n"
-                f"Твоя ссылка:\n<code>{link}</code>"
+                "🤝 <b>Реферальная программа</b>\n\n"
+                "Приглашай друзей и получай:\n"
+                "• <b>20%</b> с их покупок — на твой баланс (руб.)\n"
+                "• Друзьям — <b>−10%</b> на первый заказ\n\n"
+                "Твоя персональная ссылка:\n"
+                f"<code>{link}</code>\n\n"
+                "Размести её в сторис, чатах или отправь лично — начисления придут автоматически."
             )
             await q.message.reply_text(text, reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
 
         if data == "ref_income":
             u = get_user(uid)
             await q.message.reply_text(
-                f"📈 Всего: {u.ref_earn_total:.2f} ₽\nДоступно к выводу: {u.ref_earn_ready:.2f} ₽\nМинимум к выводу: 500 ₽",
-                reply_markup=kb_ref_menu(uid)
+                "📈 <b>Мои доходы</b>\n\n"
+                f"Всего начислено: <b>{u.ref_earn_total:.2f} ₽</b>\n"
+                f"Доступно к выводу: <b>{u.ref_earn_ready:.2f} ₽</b>\n"
+                "Минимальная сумма к выводу: <b>500 ₽</b>.\n\n"
+                "Начисления поступают после каждой оплаты приглашённых пользователей.",
+                reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML
             ); return
 
         if data == "ref_list":
-            await q.message.reply_text("Список рефералов появится позже.", reply_markup=kb_ref_menu(uid)); return
+            await q.message.reply_text(
+                "👥 <b>Мои рефералы</b>\n\n"
+                "Отображение списка в разработке. Пока доступна статистика доходов и ссылка.\n"
+                "Продолжай делиться — это окупает генерации! ✨",
+                reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML
+            ); return
 
         if data == "ref_payout":
-            await q.message.reply_text("Для вывода напиши @photofly_ai (от 500 ₽).", reply_markup=kb_ref_menu(uid)); return
+            await q.message.reply_text(
+                "💳 <b>Вывести средства</b>\n\n"
+                "• Доступный баланс: см. раздел «Мои доходы»\n"
+                "• Минимум к выводу: <b>500 ₽</b>\n"
+                "• Способ: перевод по реквизитам, уточняем в чате\n\n"
+                "Напиши нашему оператору — оформим выплату:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗣 Написать в поддержку", url="https://t.me/photofly_ai")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+                ]),
+                parse_mode=ParseMode.HTML
+            ); return
 
         if data == "buy_flash_50":
-            st.balance += FLASH_OFFER["qty"]; st.paid_any = True; save_user(st)
-            await q.message.reply_text(f"✅ Начислено {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.",
-                                       reply_markup=kb_upload_fixed()); return
+            st.balance += FLASH_OFFER["qty"]
+            st.paid_any = True
+            save_user(st)
+            # Если модель есть — сразу к генерациям
+            if st.has_model:
+                await q.message.reply_text(
+                    f"✅ Начислено {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.\n\n"
+                    "Переходим к генерациям — выбери раздел:",
+                    reply_markup=kb_gender(), parse_mode=ParseMode.HTML
+                )
+            else:
+                await q.message.reply_text(
+                    f"✅ Начислено {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.\n\n"
+                    "📥 <b>Требования к фото для обучения</b>\n"
+                    "• От <b>20</b> до <b>50</b> фотографий (лучше 25–35)\n"
+                    "• Разные ракурсы и сцены, различные освещения\n"
+                    "• <b>Без</b> очков/кепок/масок, без сильных фильтров\n"
+                    "• Файлы чистые и чёткие\n\n"
+                    "Когда закончишь — нажми «Фото загружены».",
+                    reply_markup=kb_upload_fixed(), parse_mode=ParseMode.HTML
+                )
+            return
 
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Принимаем фото без ответных уведомлений."""
+        """Принимаем фото молча (без уведомлений)."""
         uid = update.effective_user.id
         _ = get_user(uid)
-        if not update.message.photo:  # защита
+        if not update.message.photo:
             return
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -462,11 +581,16 @@ class TgApp:
                     r = await cl.post(f"{BACKEND_ROOT}/api/upload_photo", data=data, files=files)
                     r.raise_for_status()
         except Exception:
-            # молча игнорируем единичные сбои, чтобы не спамить
+            # Молча игнорируем единичные сбои, чтобы не спамить
             pass
 
     # ---------- HELPERS ----------
     async def _launch_training_and_wait(self, uid: int, context: ContextTypes.DEFAULT_TYPE):
+        st = get_user(uid)
+        # Одна модель на аккаунт — пресекаем повторный запуск
+        if st.has_model:
+            await context.bot.send_message(chat_id=uid, text="ℹ️ Модель уже обучена. Переходим к генерациям:", reply_markup=kb_gender())
+            return
         try:
             async with httpx.AsyncClient(timeout=180) as cl:
                 r = await cl.post(f"{BACKEND_ROOT}/api/train", data={"user_id": str(uid)})
@@ -478,13 +602,15 @@ class TgApp:
             await context.bot.send_message(chat_id=uid, text="❌ Не удалось запустить обучение. Попробуйте ещё раз.")
             return
 
-        st = get_user(uid); st.job_id = job_id; save_user(st)
+        st.job_id = job_id
+        save_user(st)
 
         status_url = f"{BACKEND_ROOT}/api/status/{job_id}"
         for _ in range(300):
             try:
                 async with httpx.AsyncClient(timeout=30) as cl:
-                    rr = await cl.get(status_url); rr.raise_for_status()
+                    rr = await cl.get(status_url)
+                    rr.raise_for_status()
                     dd = rr.json()
                     status = (dd.get("status") or "").lower()
                     model_id = dd.get("model_id")
@@ -515,7 +641,8 @@ class TgApp:
 
     async def _generate(self, uid: int, job_id: Optional[str], prompt: str, n: int) -> List[str]:
         body = {"user_id": str(uid), "prompt": prompt, "num_images": n}
-        if job_id: body["job_id"] = job_id
+        if job_id:
+            body["job_id"] = job_id
         async with httpx.AsyncClient(timeout=240) as cl:
             r = await cl.post(f"{BACKEND_ROOT}/api/generate", json=body)
             r.raise_for_status()
@@ -527,6 +654,7 @@ class TgApp:
 
     # ---------- FLASH OFFER SCHEDULER ----------
     async def _flash_offer_scheduler(self):
+        """Через ~24 часа после первого входа — разовая акция 50 генераций за 390₽."""
         while True:
             now = time.time()
             try:
@@ -534,6 +662,7 @@ class TgApp:
                     st = UserState(**v)
                     if st.flash_sent:
                         continue
+                    # 24 часа после первого взаимодействия
                     if now - (st.first_seen_ts or now) >= 24 * 3600:
                         await self._send_flash_offer(st.id)
                         st.flash_sent = True
@@ -544,13 +673,20 @@ class TgApp:
 
     async def _send_flash_offer(self, uid: int):
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛒 Приобрести", callback_data="buy_flash_50")],
+            [InlineKeyboardButton(f"🔥 Купить 50 генераций — {FLASH_OFFER['price']} ₽", callback_data="buy_flash_50")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
         ])
         try:
-            await self.app.bot.send_message(chat_id=uid,
-                text=f"🔥 Только сейчас! {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.",
-                reply_markup=kb)
+            await self.app.bot.send_message(
+                chat_id=uid,
+                text=(
+                    "⚡ <b>Акция на 24 часа</b>\n\n"
+                    f"Для вас подготовлено предложение: <b>{FLASH_OFFER['qty']} генераций</b> всего за "
+                    f"<b>{FLASH_OFFER['price']} ₽</b>.\n\n"
+                    "Успей воспользоваться и пополнить баланс выгодно!"
+                ),
+                reply_markup=kb, parse_mode=ParseMode.HTML
+            )
         except Exception:
             pass
 
