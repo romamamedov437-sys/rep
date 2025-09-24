@@ -144,7 +144,7 @@ async def debug_stats():
         by_status: Dict[str, int] = {}
         for j in jobs.values():
             st = (j.get("status") or "").lower()
-            by_status[st] = by_status.get(st, 0) + 1
+            by_status[st] = by_status.get(st, "0") + 1 if isinstance(by_status.get(st), int) else 1
 
         def _dir_size(path: str) -> int:
             total = 0
@@ -485,7 +485,7 @@ async def api_pay_create(request: Request):
     """
     Создать платёж YooKassa и вернуть confirmation_url.
     Принимает:
-      - application/json: { user_id:int, qty:int, amount:int, title:str }
+      - application/json: { user_id:int, qty:int, amount:int, title:str, email?:str }
       - либо form-data с теми же полями
     """
     body: Dict[str, Any] = {}
@@ -495,7 +495,7 @@ async def api_pay_create(request: Request):
             body = await request.json()
         else:
             form = await request.form()
-            body = {k: form.get(k) for k in ("user_id", "qty", "amount", "title")}
+            body = {k: form.get(k) for k in ("user_id", "qty", "amount", "title", "email")}
     except Exception:
         body = {}
 
@@ -507,6 +507,7 @@ async def api_pay_create(request: Request):
     except Exception:
         amount = int(amount_raw or 0)
     title = (str(body.get("title") or "").strip()) or f"{qty} генераций"
+    receipt_email = (body.get("email") or RECEIPTS_BCC_EMAIL).strip()
 
     if not (user_id and qty and amount):
         raise HTTPException(400, "invalid payment params")
@@ -517,11 +518,27 @@ async def api_pay_create(request: Request):
         "Idempotence-Key": idemp,
         "Content-Type": "application/json",
     }
+
+    # 🔴 ВАЖНО: Чек (УСН без НДС). Если email не передан — используем твой.
+    receipt = {
+        "customer": {"email": receipt_email},
+        "tax_system_code": 2,  # УСН
+        "items": [{
+            "description": title if title else f"{qty} генераций",
+            "quantity": "1.00",
+            "amount": _rub(amount),
+            "vat_code": 6,                 # без НДС
+            "payment_subject": "service",
+            "payment_mode": "full_payment"
+        }]
+    }
+
     payload = {
         "amount": _rub(amount),
         "capture": True,
         "description": f"User {user_id}: {title}",
         "confirmation": {"type": "redirect", "return_url": PUBLIC_URL or "https://t.me"},
+        "receipt": receipt,
         "metadata": {"user_id": user_id, "qty": qty, "amount": amount},
     }
 
