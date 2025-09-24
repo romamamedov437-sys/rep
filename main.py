@@ -34,9 +34,10 @@ REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 
 # ---------- YOOKASSA (PAYMENTS) ----------
-# ВАЖНО: без дефолтов — берём только из ENV, чтобы ключи не светились в коде/репозитории.
 YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
+# База API и прокси можно задать из ENV (для обхода сетевых блокировок)
+YOOKASSA_API_BASE = (os.getenv("YOOKASSA_API_BASE") or "https://api.yookassa.ru").rstrip("/")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("web")
@@ -44,9 +45,9 @@ log = logging.getLogger("web")
 # ---------- APP ----------
 app = FastAPI()
 
-# Персистентные директории (Render): можно переопределить через DATA_DIR, по умолчанию /var/data
+# Персистентные директории (Render)
 BASE_DIR = os.getenv("DATA_DIR", "/var/data")
-DATA_DIR = BASE_DIR  # совместимость
+DATA_DIR = BASE_DIR
 USERS_DIR = os.path.join(DATA_DIR, "users")
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
 PAY_DB_PATH = os.path.join(DATA_DIR, "payments.json")
@@ -58,17 +59,18 @@ def _pay_db_load() -> Dict[str, Any]:
         return {}
     try:
         with open(PAY_DB_PATH, "r", encoding="utf-8") as f:
+            import json
             return json.load(f)
     except Exception:
         return {}
 
 def _pay_db_save(db: Dict[str, Any]) -> None:
+    import json
     tmp = PAY_DB_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
     os.replace(tmp, PAY_DB_PATH)
 
-import json
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -133,7 +135,6 @@ async def debug_stats():
             st = (j.get("status") or "").lower()
             by_status[st] = by_status.get(st, 0) + 1
 
-        # Пример простой оценки занимаемого места
         def _dir_size(path: str) -> int:
             total = 0
             if not os.path.isdir(path):
@@ -180,6 +181,7 @@ async def debug_env():
         "GEN_FALLBACK": FLUX_FAST_MODEL,
         "YOOKASSA_SHOP_ID_SET": bool(YOOKASSA_SHOP_ID),
         "YOOKASSA_SECRET_SET": bool(YOOKASSA_SECRET_KEY),
+        "YOOKASSA_API_BASE": YOOKASSA_API_BASE,
     }
 
 # ============ WEBHOOK ============
@@ -296,11 +298,10 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
                 if last_code == 404:
                     continue
                 raise HTTPException(status_code=500, detail=f"replicate train failed ({last_code}): {last_text}")
-            except Exception as e:
-                last_text, last_code = repr(e), 0
+            except Exception:
                 continue
 
-    raise HTTPException(status_code=500, detail=f"replicate train failed (exhausted urls), last={last_code} {last_text}")
+    raise HTTPException(status_code=500, detail=f"replicate train failed (exhausted urls)")
 
 async def get_replicate_training_status(training_id: str) -> Dict[str, Any]:
     if not REPLICATE_API_TOKEN:
@@ -362,8 +363,7 @@ async def call_replicate_generate(prompt: str, model_id: Optional[str], num_imag
             _, version_hash = await _resolve_model_and_version(cl, base_model, headers)
             data = await _post_prediction_via_version(cl, version_hash, prompt, int(num_images or 1), headers)
         except httpx.HTTPStatusError as e:
-            code = e.response.status_code if e.response is not None else 0
-            log.warning("Primary model '%s' failed (%s). Trying fallback '%s'", base_model, code, FLUX_FAST_MODEL)
+            log.warning("Primary model '%s' failed (%s). Trying fallback '%s'", base_model, e.response.status_code if e.response else "?", FLUX_FAST_MODEL)
             _, version_hash = await _resolve_model_and_version(cl, FLUX_FAST_MODEL, headers)
             data = await _post_prediction_via_version(cl, version_hash, prompt, int(num_images or 1), headers)
 
@@ -424,7 +424,7 @@ async def _notify_user_credit(user_id: int, qty: int, amount: int):
     except Exception as e:
         log.warning(f"notify user failed: {e!r}")
 
-# <<< ИЗМЕНЕНО: принимает JSON/FORM + увеличенные таймауты и ретраи >>>
+# принимает JSON/FORM + увеличенные таймауты, ретраи, http2 выключен, trust_env включён (исп. HTTPS_PROXY если задан)
 @app.post("/api/pay")
 async def api_pay_create(request: Request):
     """
@@ -470,12 +470,14 @@ async def api_pay_create(request: Request):
         "metadata": {"user_id": user_id, "qty": qty, "amount": amount},
     }
 
-    timeout = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=10.0)
+    timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=10.0)
     last_err = None
+    url = f"{YOOKASSA_API_BASE}/v3/payments"
+
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=timeout) as cl:
-                r = await cl.post("https://api.yookassa.ru/v3/payments", headers=headers, json=payload)
+            async with httpx.AsyncClient(timeout=timeout, http2=False, trust_env=True) as cl:
+                r = await cl.post(url, headers=headers, json=payload)
                 if r.status_code >= 400:
                     raise HTTPException(r.status_code, f"yookassa create failed: {r.text}")
                 data = r.json()
@@ -498,21 +500,17 @@ async def api_pay_create(request: Request):
             await asyncio.sleep(wait)
 
     raise HTTPException(status_code=504, detail=f"yookassa create timeout: {last_err!r}")
-# >>> КОНЕЦ изменения
 
 @app.get("/api/pay/status")
 async def api_pay_status(payment_id: str):
-    headers = {
-        "Authorization": _yk_auth_header(),
-    }
-    async with httpx.AsyncClient(timeout=20) as cl:
-        r = await cl.get(f"https://api.yookassa.ru/v3/payments/{payment_id}", headers=headers)
+    headers = {"Authorization": _yk_auth_header()}
+    async with httpx.AsyncClient(timeout=20, http2=False, trust_env=True) as cl:
+        r = await cl.get(f"{YOOKASSA_API_BASE}/v3/payments/{payment_id}", headers=headers)
         if r.status_code >= 400:
             raise HTTPException(r.status_code, f"yookassa status failed: {r.text}")
         data = r.json()
     status = data.get("status")
     meta = (data.get("metadata") or {})
-    # кредитуем, если нужно
     if status == "succeeded":
         stored = PAYMENTS.get(payment_id) or {}
         if stored.get("status") != "succeeded":
@@ -524,7 +522,6 @@ async def api_pay_status(payment_id: str):
                 st.balance += qty
                 st.paid_any = True
                 save_user(st)
-                # реферал — начислим 20% от фактической суммы оплаты (если есть referer)
                 if st.referred_by:
                     ref = get_user(st.referred_by)
                     ref_gain = round(amount * 0.20, 2)
@@ -572,7 +569,6 @@ async def api_status(job_id: str):
             st = await get_replicate_training_status(training_id)
             state = st.get("status") or st.get("state")
             out = st.get("output") or {}
-            # важный фикс: у fast-flux-trainer модель лежит в output.version
             model = out.get("version") or out.get("model") or out.get("id") or st.get("destination")
             if state:
                 j["status"] = state
@@ -584,7 +580,7 @@ async def api_status(job_id: str):
 
     return {"job_id": job_id, "status": j.get("status"), "progress": j.get("progress", 0), "model_id": j.get("model_id")}
 
-@app.post("/api/ggenerate")  # старый роут оставляем как синоним
+@app.post("/api/ggenerate")
 async def api_generate_alias(request: Request,
                              user_id: Optional[str] = Form(None),
                              prompt: Optional[str] = Form(None),
