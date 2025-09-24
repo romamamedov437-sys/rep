@@ -1,4 +1,3 @@
-# bot.py
 import os
 import json
 import time
@@ -386,6 +385,7 @@ class TgApp:
         self.app.add_handler(CommandHandler("stats", self.on_stats))  # 🔹 админская статистика
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.on_photo))
+        # лог всего
         self.app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
         self.app.add_error_handler(on_error)
         await self.app.initialize()
@@ -426,15 +426,15 @@ class TgApp:
                 except Exception:
                     pass
 
-        # 🔥 Больше продающего текста на стартовом экране
+        # 🔥 Продающий текст на стартовом экране
         text = (
             "👋 <b>Привет!</b> Это <b>PhotoFly</b> — твоя персональная фотостудия с ИИ.\n\n"
-            "Создавай живые портреты в модных стилях: от fashion-съёмок до бомбических travel-кадров. "
-            "Без студии, без фотографа — результат за минуту.\n\n"
-            "Что получишь:\n"
-            "• Реалистичную кожу и свет — без «пластика»\n"
-            "• Десятки сценариев съёмки и ракурсов\n"
-            "• 3 кадра за одну генерацию\n\n"
+            "✨ Создавай <b>реалистичные портреты</b> за минуту прямо в Telegram.\n"
+            "Без студии и фотографа — всё в один клик.\n\n"
+            "<b>Что получишь:</b>\n"
+            "• 🌟 Живые эмоции и естественный свет\n"
+            "• 💎 Качественный результат без «пластика»\n"
+            "• 🔥 Десятки уникальных сценариев съёмки\n\n"
             "Выбирай пакет — и полетели! Нажми «🎯 Попробовать»."
         )
         await update.effective_message.reply_text(text, reply_markup=kb_home(st.paid_any), parse_mode=ParseMode.HTML)
@@ -472,12 +472,11 @@ class TgApp:
         """Создаём платёж через backend, получаем ссылку и показываем пользователю."""
         try:
             async with httpx.AsyncClient(timeout=30) as cl:
-                # ⬇️ Исправлено согласно вашему требованию: приводим типы явно
                 r = await cl.post(f"{BACKEND_ROOT}/api/pay", json={
-                    "user_id": int(uid),       # число
-                    "qty": int(qty),           # число
-                    "amount": int(amount_rub), # число
-                    "title": str(title)        # строка
+                    "user_id": int(uid),
+                    "qty": int(qty),
+                    "amount": int(amount_rub),
+                    "title": str(title)
                 })
                 r.raise_for_status()
                 data = r.json()
@@ -591,7 +590,7 @@ class TgApp:
                 await context.bot.send_message(chat_id=uid, text="❌ Ошибка при генерации. Попробуйте ещё раз.")
                 return
             st.balance -= 3; save_user(st)
-            # 👉 добавили parse_mode=HTML в первый элемент, чтобы <b>...</b> не печатался текстом
+            # HTML в подписи к первому фото
             media = [InputMediaPhoto(imgs[0], caption=f"Готово! Списано: 3. Остаток: <b>{st.balance}</b>", parse_mode=ParseMode.HTML)] + [InputMediaPhoto(u) for u in imgs[1:]]
             await context.bot.send_media_group(chat_id=uid, media=media)
             if st.gender_pref in ("men", "women"):
@@ -706,7 +705,7 @@ class TgApp:
                 for i, r in enumerate(refs[:50], 1):
                     status = "оплатил(а)" if r["paid"] else "без оплаты"
                     lines.append(f"{i}. <code>{r['id']}</code> — {status}, баланс: {r['balance']}")
-                lines.append("\nПродолжай делиться — это окупает генерации! ✨")
+                lines.append("\nПродолжай делиться — это окупает поколения! ✨".replace("поколения","генерации"))
                 text = "\n".join(lines)
             await q.message.reply_text(text, reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
 
