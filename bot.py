@@ -467,11 +467,12 @@ class TgApp:
         """Создаём платёж через backend, получаем ссылку и показываем пользователю."""
         try:
             async with httpx.AsyncClient(timeout=30) as cl:
+                # ⬇️ Исправлено согласно вашему требованию: приводим типы явно
                 r = await cl.post(f"{BACKEND_ROOT}/api/pay", json={
-                    "user_id": uid,
-                    "qty": qty,
-                    "amount": amount_rub,
-                    "title": title
+                    "user_id": int(uid),       # число
+                    "qty": int(qty),           # число
+                    "amount": int(amount_rub), # число
+                    "title": str(title)        # строка
                 })
                 r.raise_for_status()
                 data = r.json()
