@@ -493,7 +493,7 @@ async def api_pay_create(request: Request):
                     "created_at": time.time(),
                 })
                 return {"payment_id": payment_id, "confirmation_url": confirmation_url}
-        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.NetworkError) as e:
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RequestError) as e:
             last_err = e
             wait = 1.5 * (attempt + 1)
             log.warning(f"YooKassa create timeout (try {attempt+1}/3), retry in {wait}s: {e!r}")
