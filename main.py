@@ -424,16 +424,37 @@ async def _notify_user_credit(user_id: int, qty: int, amount: int):
     except Exception as e:
         log.warning(f"notify user failed: {e!r}")
 
+# <<< ИЗМЕНЕНО: принимает JSON ИЛИ form-data >>>
 @app.post("/api/pay")
-async def api_pay_create(body: Dict[str, Any]):
+async def api_pay_create(request: Request):
     """
     Создать платёж YooKassa и вернуть confirmation_url.
-    body = { user_id:int, qty:int, amount:int, title:str }
+    Принимает:
+      - application/json: { user_id:int, qty:int, amount:int, title:str }
+      - либо form-data с теми же полями
     """
-    user_id = int(body.get("user_id") or 0)
-    qty = int(body.get("qty") or 0)
-    amount = int(body.get("amount") or 0)
-    title = (body.get("title") or "").strip() or f"{qty} генераций"
+    body: Dict[str, Any] = {}
+    ctype = (request.headers.get("content-type") or "").lower()
+    try:
+        if "application/json" in ctype:
+            body = await request.json()
+        else:
+            form = await request.form()
+            body = {k: form.get(k) for k in ("user_id", "qty", "amount", "title")}
+    except Exception:
+        body = {}
+
+    # нормализуем типы
+    user_id = int((body.get("user_id") or 0))
+    qty = int((body.get("qty") or 0))
+    # amount может прийти строкой с копейками
+    amount_raw = body.get("amount") or 0
+    try:
+        amount = int(float(amount_raw))
+    except Exception:
+        amount = int(amount_raw or 0)
+    title = (str(body.get("title") or "").strip()) or f"{qty} генераций"
+
     if not (user_id and qty and amount):
         raise HTTPException(400, "invalid payment params")
 
@@ -476,6 +497,7 @@ async def api_pay_create(body: Dict[str, Any]):
         "created_at": time.time(),
     })
     return {"payment_id": payment_id, "confirmation_url": confirmation_url}
+# >>> КОНЕЦ изменения
 
 @app.get("/api/pay/status")
 async def api_pay_status(payment_id: str):
