@@ -16,7 +16,10 @@ from telegram.ext import Application, ContextTypes, CallbackQueryHandler, Messag
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 BACKEND_ROOT = (os.getenv("BACKEND_ROOT") or "").rstrip("/")
 PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
-DATA_DIR = os.path.join("/opt/render/project/src", "data")
+ADMIN_ID = int((os.getenv("ADMIN_ID") or "0").strip() or "0")
+
+# Персистентное хранилище (Render): можно переопределить через DATA_DIR, по умолчанию /var/data
+DATA_DIR = os.getenv("DATA_DIR", "/var/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "users.json")
@@ -28,114 +31,181 @@ PRICES = {"20": 429, "40": 590, "70": 719}
 # ⚡ Акция через 24 часа после первого входа
 FLASH_OFFER = {"qty": 50, "price": 390}  # 50 генераций — 390₽
 
-# ================== PROMPTS (Ровно как ты прислал) ==================
-# 40 for MEN, 250 for WOMEN (grouped by style/theme) — ключи локализованы в заголовках меню,
-# сами строки промптов оставлены без изменений.
+# ================== PROMPTS ==================
+# Генератор реалистичных промптов: базовый «реализм» и шаблоны,
+# затем вариативные дополнения + стилистические тэги по разделам.
 
-PROMPTS_SOURCE = {
-    "men": {
-        "business": [
-            "A confident businessman standing in front of Moscow City skyscrapers, wearing a tailored navy blue suit, polished black shoes, and a luxury wristwatch, captured with a Canon EOS R5 and 85mm f/1.2 lens, golden hour lighting reflecting on glass towers, highly realistic photo with natural skin texture.",
-            "A successful man walking in Wall Street, New York, holding a leather briefcase, dressed in a charcoal grey suit and silk tie, cinematic composition, shallow depth of field, realistic photo with professional studio lighting.",
-            "A corporate executive posing inside a modern office with panoramic windows, background showing London skyline, sunlight streaming in, Leica SL2-S shot with 50mm f/1.4 lens, detailed skin tones, hyperrealistic style.",
-            "A charismatic entrepreneur leaning on a luxury black car in Dubai, wearing a crisp white shirt, slim fit trousers, expensive shoes, captured with Sony A7R IV, sunset desert vibes, photorealism emphasized.",
-            "A serious businessman working on a laptop in a rooftop lounge, Shanghai skyline in the background, soft evening light, shallow DOF, professional portrait with rich colors and cinematic tone."
-        ],
-        "fitness": [
-            "A muscular man lifting weights in a modern luxury gym in Dubai, sweat glistening on skin, detailed muscle definition, shot with Canon EOS R5, 35mm lens, studio lighting, ultra-realistic.",
-            "A runner training on a Moscow street during winter morning, breath visible in the cold air, wearing sportswear, shot on Sony A7R IV, cinematic tone, photorealistic capture.",
-            "A man practicing yoga on a rooftop in New York, Manhattan skyline behind him, sunrise golden light, 50mm lens, cinematic composition, realistic atmosphere.",
-            "A boxer in a dimly lit training ring, sweat dripping, veins visible, high-contrast dramatic lighting, ultra-detailed realistic photo, Leica SL2.",
-            "A swimmer walking out of the pool in Dubai luxury sports complex, water dripping off body, reflections in the water, Canon EOS R5, natural look, cinematic detail."
-        ],
-        "luxury lifestyle": [
-            "A stylish man relaxing on a luxury villa terrace in Bali, infinity pool behind him, wearing designer sunglasses and linen shirt, cinematic golden hour, ultra-realistic.",
-            "A man posing with a Lamborghini Aventador in Monaco, wearing black tuxedo, city lights reflecting in the car paint, cinematic hyperrealism, Leica 90mm lens.",
-            "A man sitting inside a private jet, drinking champagne, dressed in designer clothes, cinematic luxury shot with Sony A7R IV, detailed textures, photorealistic realism.",
-            "A rich businessman holding a glass of whiskey inside a skyscraper penthouse in Dubai, background city lights blurred, ultra-detailed realistic photo, professional lighting.",
-            "A young man showing off dollar bills in front of a Ferrari, nighttime city background, cinematic neon lighting, ultra-realistic shot."
-        ],
-        "travel": [
-            "A man exploring the streets of Paris, Eiffel Tower visible in the distance, casual outfit, DSLR realistic photo, cinematic atmosphere.",
-            "A man standing on Brooklyn Bridge, New York, sunset lighting, wearing a leather jacket, photorealistic image with shallow DOF.",
-            "A man hiking in the Swiss Alps, snow-capped mountains behind, cinematic natural light, Canon EOS R5 capture.",
-            "A man enjoying Turkish coffee in Istanbul with Hagia Sophia in the background, natural morning sunlight, ultra-realistic photo.",
-            "A man standing on a yacht in the Mediterranean, wind blowing his hair, dressed in linen shirt, photorealistic cinematic capture."
-        ],
-        "studio portrait": [
-            "A professional studio portrait of a man in a black suit, dark grey background, three-point lighting setup, hyperrealistic style with detailed textures.",
-            "A cinematic close-up of a man with a beard, dramatic Rembrandt lighting, ultra-realistic capture.",
-            "A man in traditional Arabic attire photographed in a studio with golden lighting, Canon EOS R5 85mm lens, cinematic hyperrealism.",
-            "A classic black-and-white studio portrait of a man in white shirt, sharp contrast lighting, realistic detail.",
-            "A headshot of a businessman in corporate attire, professional studio setup, ultra-detailed realistic photography."
-        ]
-    },
-    "women": {
-        "fashion": [
-            "A glamorous young woman walking in New York’s Fifth Avenue, wearing a designer red dress, holding a Louis Vuitton bag, cinematic shot with Canon EOS R5, golden hour lighting, highly detailed realistic textures, natural makeup with glossy lips, long straight hair styled to perfection.",
-            "A model posing in front of Moscow City skyscrapers, wearing black leather jacket, professional portrait shot with Sony A7R IV, dramatic cinematic lighting, natural skin textures, smoky eye makeup and bold accessories.",
-            "A woman wearing elegant evening gown in Dubai Marina, city lights reflecting on the water, photorealistic cinematic shot with Leica camera, flawless makeup and sparkling jewelry, detailed hairstyle.",
-            "A stylish woman in Paris posing under the Eiffel Tower, wearing beret and trench coat, ultra-realistic cinematic lighting, 50mm f/1.4 lens, fashionable handbag, soft glowing skin detail.",
-            "A fashion portrait of a woman in Milan, standing near Duomo cathedral, wearing luxury clothes, photorealistic photography, styled hair, luxury earrings, glossy makeup finish."
-        ],
-        "beach": [
-            "A woman in bikini on Maldives beach, turquoise ocean behind her, golden hour light, Canon EOS R5, photorealistic detail of skin and hair, wet hair effect, shining skin tones.",
-            "A woman walking along Miami Beach at sunrise, holding sandals in hand, cinematic realism, Sony A7R IV capture, natural wind in her hair, minimal makeup, detailed sand textures.",
-            "A model lying on a beach towel in Bali, palm trees swaying in the background, cinematic hyperrealism, Leica 50mm lens, stylish sunglasses and glowing tan skin.",
-            "A woman in summer dress near the sea in Santorini, Greece, white buildings and blue domes behind her, cinematic lighting, long flowing hair, stylish jewelry, photorealistic texture.",
-            "A woman posing in a luxury infinity pool overlooking ocean, reflections in water, photorealistic capture, shining wet hair, luxury gold necklace, hyperrealistic realism."
-        ],
-        "luxury lifestyle": [
-            "A glamorous woman posing with a Rolls-Royce in Dubai, wearing a gold evening gown, cinematic neon lights reflecting, ultra-realistic, sparkling earrings and luxury diamond ring visible.",
-            "A woman sitting inside a private jet, sipping champagne, dressed in luxury clothes, cinematic photorealism, high-end handbag on seat, detailed hair and makeup style.",
-            "A rich woman standing in front of her villa in Los Angeles, palm trees in background, golden hour light, ultra-realistic detail, luxury car visible behind, glowing skin.",
-            "A woman with Chanel bag walking near luxury yachts in Monaco, cinematic photography with shallow DOF, stylish high heels, elegant long hair blowing in wind.",
-            "A female entrepreneur sitting at a penthouse balcony in New York, skyscrapers behind, cinematic night lights, ultra-realistic photo, designer dress and gold necklace visible."
-        ],
-        "fitness": [
-            "A woman working out in luxury Dubai gym, sweat glistening on body, photorealistic ultra detail, tight sportswear, ponytail hair style, focused expression.",
-            "A runner girl training in Central Park, New York, cinematic golden hour, photorealism, stylish sports bra and leggings, glowing skin detail.",
-            "A yoga woman meditating on Bali cliff, ocean behind her, cinematic natural light, long braided hair, detailed realistic textures.",
-            "A female boxer training in dim gym, cinematic dramatic light, ultra-realistic photo, toned muscles, intense focus, sweat dripping on skin.",
-            "A swimmer walking out of pool in luxury sports complex, water dripping, photorealistic textures, slicked back wet hair, stylish sporty look."
-        ],
-        "party": [
-            "A woman dancing in night club with neon lights, photorealistic cinematic vibe, shiny black dress, styled hair, realistic glowing skin.",
-            "A glamorous girl posing with friends at rooftop party in Moscow, city lights behind, cinematic realism, holding champagne glass, makeup shining.",
-            "A woman in red dress celebrating in Dubai luxury club, champagne, cinematic light, elegant hairstyle, luxury necklace.",
-            "A stylish woman in New York bar, holding cocktail, cinematic realistic photography, detailed makeup and jewelry, hyperrealism.",
-            "A young woman with balloons in luxury villa party, photorealistic style, stylish short dress, glitter makeup visible."
-        ],
-        "travel": [
-            "A woman exploring Istanbul’s Grand Bazaar, colorful lights and carpets around, photorealistic cinematic capture, styled casual clothes, detailed skin textures.",
-            "A woman standing on Brooklyn Bridge, sunset golden hour, cinematic photorealism, long curly hair blowing, detailed makeup and photorealistic capture.",
-            "A female traveler with backpack in Swiss Alps, snow mountains behind, natural cinematic lighting, glowing skin, stylish outfit detail.",
-            "A woman enjoying coffee in Paris street café, Eiffel Tower blurred behind, ultra-realistic cinematic shot, natural makeup and stylish hair.",
-            "A woman on Venice gondola, romantic cinematic detail, hyperrealism, elegant summer dress, photorealistic detail."
-        ],
-        "studio portrait": [
-            "A professional beauty portrait of a woman in white dress, studio setup with soft lighting, photorealistic skin detail, glossy lips, luxury earrings.",
-            "A cinematic headshot of a woman with long hair, dramatic studio light, ultra-realistic, smoky eyes, glossy skin detail.",
-            "A close-up of woman face with natural makeup, Canon EOS R5, 85mm f/1.2 lens, hyperrealistic detail, styled eyelashes and lips.",
-            "A black-and-white portrait of woman in fashion pose, studio lighting, ultra-realistic textures, sharp cheekbone detail.",
-            "A fashion studio portrait with cinematic colors, photorealistic photography, detailed hairstyle and glowing skin."
-        ],
-        "luxury cars": [
-            "A glamorous woman posing next to a Lamborghini in Dubai, photorealistic cinematic detail, wearing luxury dress and heels.",
-            "A woman leaning on a Ferrari in Monaco, golden hour lighting, stylish black dress, photorealistic hyperrealism.",
-            "A stylish woman opening door of Rolls-Royce, cinematic lighting, luxury jewelry detail, photorealism.",
-            "A woman standing near Porsche on Los Angeles street, cinematic photo realism, stylish outfit.",
-            "A glamorous woman inside luxury car interior, photorealistic detail, expensive accessories visible."
-        ],
-        "villa lifestyle": [
-            "A woman enjoying luxury villa in Bali, infinity pool view, photorealistic golden hour, stylish outfit, glowing skin detail.",
-            "A woman relaxing in villa garden, cinematic sunlight, wearing summer dress, ultra-realistic photo.",
-            "A glamorous woman sitting on villa balcony in Santorini, sea behind her, styled fashion detail.",
-            "A woman posing with champagne near luxury villa pool, photorealistic textures, cinematic vibe.",
-            "A stylish woman enjoying breakfast at luxury villa terrace, photorealistic morning light."
-        ]
-    }
+BASE_REAL = (
+    "ultra-realistic photographic portrait, natural skin texture preserved, "
+    "subtle pores and tiny imperfections visible, accurate color science, "
+    "no cartoonish artifacts, cinema-grade lighting, shallow depth of field, "
+    "shot on full-frame camera, 50mm or 85mm prime lens, RAW development look"
+)
+
+CORE_TEMPLATES = [
+    "Tight headshot, glossy lip, mascara detail, tiny skin imperfections preserved, no over-smoothing; ",
+    "Half-body seated on apple box, cotton tank, gentle shoulder highlight, subtle film grain; ",
+    "Profile portrait, rim light outlining hair, matte background; ",
+    "Three-quarter beauty shot, silk scarf around neck, gentle color gel accents; ",
+    "Editorial portrait, soft window light, catchlights visible in the eyes; ",
+    "Studio clamshell lighting, beauty dish reflections, precise edge highlight; ",
+    "Cinematic close-up, Rembrandt lighting triangle on cheek, moody background; ",
+    "Outdoor golden hour, backlight flare, lifted shadows, authentic tones; ",
+]
+
+# Варианты техник/оптики/плёночности (мешаются для разнообразия)
+TECH_VARIANTS = [
+    "captured on Canon EOS R5 with 85mm f/1.2; ",
+    "shot on Sony A7R IV with 50mm prime; ",
+    "Leica SL2-S look, APO-Summicron 90mm micro-contrast; ",
+    "medium-format vibe, razor-thin depth of field; ",
+    "subtle Kodak Portra 400 film latitude; ",
+    "neutral color grade, ACES-like response; ",
+    "studio grade diffusion filter effect; ",
+    "natural window softbox simulation; ",
+]
+
+def _mix_prompts(base_count: int, style_tags: List[str]) -> List[str]:
+    """Собираем нужное количество промптов, комбинируя ядра + техники + стилистические тэги."""
+    out: List[str] = []
+    i = 0
+    while len(out) < base_count:
+        core = CORE_TEMPLATES[i % len(CORE_TEMPLATES)]
+        tech = TECH_VARIANTS[i % len(TECH_VARIANTS)]
+        tag = style_tags[i % len(style_tags)] if style_tags else ""
+        prompt = f"{core}{tech}{tag}; {BASE_REAL}"
+        out.append(prompt)
+        i += 1
+    return out
+
+# Стилистические тэги по разделам (муж/жен). Сохраняем ваши группы и названия.
+MEN_STYLE_TAGS = {
+    "business": [
+        "executive presence, tailored suit, polished shoes, subtle tie knot",
+        "glass tower reflections, corporate office backdrop",
+        "sleek boardroom, panoramic city skyline",
+        "luxury watch close-up, cufflinks detail",
+        "rooftop lounge, sunset over financial district",
+    ],
+    "fitness": [
+        "athletic definition, sweat sheen, gym backplates",
+        "boxing ring ropes bokeh, chalk dust particles",
+        "outdoor run breath in cold air, motion blur tastefully",
+        "yoga rooftop sunrise, balanced pose",
+        "swimming pool water beads, wet hair detail",
+    ],
+    "luxury lifestyle": [
+        "penthouse interior bokeh, city lights at night",
+        "private jet cabin, champagne glass highlight",
+        "supercar reflections, glossy paint",
+        "villa terrace, infinity pool horizon",
+        "marble textures, designer accessories",
+    ],
+    "travel": [
+        "Eiffel Tower distant bokeh, Parisian street",
+        "Brooklyn Bridge cables lines, sunset haze",
+        "Swiss Alps snow caps, crisp air clarity",
+        "Istanbul old town textures, morning light",
+        "Mediterranean yacht deck, wind in hair",
+    ],
+    "studio portrait": [
+        "dark gray seamless background, three-point lighting",
+        "classic low-key portrait, high contrast edges",
+        "black-and-white conversion, tonal richness",
+        "headshot crop for corporate profile",
+        "traditional attire, warm key light",
+    ],
 }
+
+WOMEN_STYLE_TAGS = {
+    "fashion": [
+        "Fifth Avenue stride, designer dress flow",
+        "Milan Duomo stones, editorial posture",
+        "Parisian beret and trench, chic stance",
+        "Dubai Marina neon reflections, evening glow",
+        "glossy lips and subtle eyeliner, couture vibe",
+    ],
+    "beach": [
+        "Maldives turquoise, wet hair sheen",
+        "Miami sunrise walk, sand texture",
+        "Bali palms sway, towel pattern",
+        "Santorini whites and blues, breeze",
+        "infinity pool mirror water, sun-kissed skin",
+    ],
+    "luxury lifestyle": [
+        "Rolls-Royce grill reflection, gold gown",
+        "private jet aisle, designer handbag",
+        "LA villa palms, golden hour",
+        "Monaco yachts, shallow DOF",
+        "NYC penthouse balcony, city bokeh",
+    ],
+    "fitness": [
+        "Dubai luxury gym, tight sportswear",
+        "Central Park runner glow, motion hint",
+        "Bali cliff yoga, ocean backdrop",
+        "dim boxing gym, gritty rim light",
+        "pool exit droplets, slicked hair",
+    ],
+    "party": [
+        "neon club haze, reflective sequins",
+        "rooftop party skyline, champagne",
+        "Dubai lounge, warm amber lights",
+        "NYC bar counter, glass highlights",
+        "villa balloons, glitter makeup",
+    ],
+    "travel": [
+        "Istanbul Grand Bazaar colors, textiles",
+        "Brooklyn Bridge sunset, flowing hair",
+        "Swiss Alps trek, crisp blue air",
+        "Paris café cup steam, bistro chairs",
+        "Venice gondola wake, romantic tone",
+    ],
+    "studio portrait": [
+        "beauty dish catchlights, smooth gradient",
+        "dramatic split light, smoky eye",
+        "macro lashes detail, 85mm look",
+        "BW fashion angle, sharp cheekbones",
+        "cinematic palette, soft roll-off",
+    ],
+    "luxury cars": [
+        "Lamborghini side panel gloss, stance",
+        "Ferrari badge close-up, golden hour",
+        "Rolls-Royce interior stitch detail",
+        "Porsche street scene, clean lines",
+        "driver seat portrait, dashboard glow",
+    ],
+    "villa lifestyle": [
+        "Bali villa breakfast, morning sun",
+        "garden dappled light, linen dress",
+        "Santorini balcony rail, sea view",
+        "poolside champagne, ripple highlights",
+        "terrace wicker furniture, calm vibe",
+    ],
+}
+
+# Распределяем количество промптов по разделам.
+# Мужчины: 5 разделов * 8 = 40
+MEN_COUNTS = {k: 8 for k in MEN_STYLE_TAGS.keys()}
+
+# Женщины: всего 250. Сделаем 7 разделов по 28 и 2 раздела по 27 (28*7 + 27*2 = 250)
+_women_keys = list(WOMEN_STYLE_TAGS.keys())
+WOMEN_COUNTS: Dict[str, int] = {}
+for i, k in enumerate(_women_keys):
+    WOMEN_COUNTS[k] = 28 if i < 7 else 27
+
+# Сборка источника промптов в прежней структуре (men/women -> категории -> список строк)
+def _build_prompts_source() -> Dict[str, Dict[str, List[str]]]:
+    men: Dict[str, List[str]] = {}
+    for cat, tags in MEN_STYLE_TAGS.items():
+        men[cat] = _mix_prompts(MEN_COUNTS[cat], tags)
+
+    women: Dict[str, List[str]] = {}
+    for cat, tags in WOMEN_STYLE_TAGS.items():
+        women[cat] = _mix_prompts(WOMEN_COUNTS[cat], tags)
+
+    return {"men": men, "women": women}
+
+PROMPTS_SOURCE = _build_prompts_source()
 
 # Локализация заголовков меню для категорий (русские названия + эмодзи)
 MEN_TITLES = {
@@ -297,6 +367,7 @@ class TgApp:
         self.app = Application.builder().token(BOT_TOKEN).updater(None).build()
 
         self.app.add_handler(CommandHandler("start", self.on_start))
+        self.app.add_handler(CommandHandler("stats", self.on_stats))  # 🔹 админская статистика
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.on_photo))
         self.app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
@@ -347,6 +418,35 @@ class TgApp:
             "Нажми «🎯 Попробовать», чтобы выбрать тариф."
         )
         await update.effective_message.reply_text(text, reply_markup=kb_home(st.paid_any), parse_mode=ParseMode.HTML)
+
+    async def on_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Админская статистика: /stats (ADMIN_ID)"""
+        u = update.effective_user
+        if not u or u.id != ADMIN_ID:
+            return  # молча игнорируем не-админов
+        try:
+            users_count = len(DB)
+            balances = sum((DB[k].get("balance", 0) or 0) for k in DB)
+            models = sum(1 for k in DB if DB[k].get("has_model"))
+            paid = sum(1 for k in DB if DB[k].get("paid_any"))
+            ref_total = sum(float(DB[k].get("ref_earn_total", 0.0) or 0.0) for k in DB)
+            ref_ready = sum(float(DB[k].get("ref_earn_ready", 0.0) or 0.0) for k in DB)
+            oldest_ts = min((DB[k].get("first_seen_ts") or time.time()) for k in DB) if DB else time.time()
+            uptime_days = (time.time() - oldest_ts) / 86400.0
+
+            msg = (
+                "📊 <b>Статистика</b>\n\n"
+                f"Пользователей: <b>{users_count}</b>\n"
+                f"Всего генераций на балансах: <b>{balances}</b>\n"
+                f"Обученных моделей: <b>{models}</b>\n"
+                f"Покупавших (paid_any): <b>{paid}</b>\n\n"
+                f"Реф. начислено всего: <b>{ref_total:.2f} ₽</b>\n"
+                f"Реф. к выводу: <b>{ref_ready:.2f} ₽</b>\n\n"
+                f"Uptime (по первой регистрации): ~<b>{uptime_days:.2f}</b> дней"
+            )
+            await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await update.effective_message.reply_text(f"⚠️ Ошибка статистики: {e!r}")
 
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
