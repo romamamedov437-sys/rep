@@ -32,180 +32,201 @@ PRICES = {"20": 429, "40": 590, "70": 719}
 FLASH_OFFER = {"qty": 50, "price": 390}  # 50 генераций — 390₽
 
 # ================== PROMPTS ==================
-# Генератор реалистичных промптов: базовый «реализм» и шаблоны,
-# затем вариативные дополнения + стилистические тэги по разделам.
+# Реализм без «пластика»: мягкая ретушь ~50%, текстуры кожи и поры видны.
+# Для мужчин — явные male-маркеры, мужская внешность/гардероб/поза.
+# Планы: head & shoulders / half-body / three-quarter / full-body.
 
-BASE_REAL = (
-    "ultra-realistic photographic portrait, natural skin texture preserved, "
-    "subtle pores and tiny imperfections visible, accurate color science, "
-    "no cartoonish artifacts, cinema-grade lighting, shallow depth of field, "
-    "shot on full-frame camera, 50mm or 85mm prime lens, RAW development look"
+# Общие строительные блоки
+RETREAL = (
+    "realistic photographic look, natural color science, subtle skin retouch (~50%), "
+    "pores and tiny imperfections preserved, no plastic smoothing"
 )
-
-CORE_TEMPLATES = [
-    "Tight headshot, glossy lip, mascara detail, tiny skin imperfections preserved, no over-smoothing; ",
-    "Half-body seated on apple box, cotton tank, gentle shoulder highlight, subtle film grain; ",
-    "Profile portrait, rim light outlining hair, matte background; ",
-    "Three-quarter beauty shot, silk scarf around neck, gentle color gel accents; ",
-    "Editorial portrait, soft window light, catchlights visible in the eyes; ",
-    "Studio clamshell lighting, beauty dish reflections, precise edge highlight; ",
-    "Cinematic close-up, Rembrandt lighting triangle on cheek, moody background; ",
-    "Outdoor golden hour, backlight flare, lifted shadows, authentic tones; ",
+OPTICS = [
+    "full-frame prime 50mm", "full-frame prime 85mm", "studio 90mm macro look",
+    "medium-format shallow depth", "neutral ACES-like grade", "soft diffusion filter",
+    "window softbox simulation", "film-like gentle grain"
+]
+LIGHT = [
+    "soft window light", "Rembrandt key light", "clamshell beauty light",
+    "cinematic rim light", "golden hour backlight", "studio three-point light"
 ]
 
-# Варианты техник/оптики/плёночности (мешаются для разнообразия)
-TECH_VARIANTS = [
-    "captured on Canon EOS R5 with 85mm f/1.2; ",
-    "shot on Sony A7R IV with 50mm prime; ",
-    "Leica SL2-S look, APO-Summicron 90mm micro-contrast; ",
-    "medium-format vibe, razor-thin depth of field; ",
-    "subtle Kodak Portra 400 film latitude; ",
-    "neutral color grade, ACES-like response; ",
-    "studio grade diffusion filter effect; ",
-    "natural window softbox simulation; ",
-]
-
-def _mix_prompts(base_count: int, style_tags: List[str]) -> List[str]:
-    """Собираем нужное количество промптов, комбинируя ядра + техники + стилистические тэги."""
-    out: List[str] = []
-    i = 0
-    while len(out) < base_count:
-        core = CORE_TEMPLATES[i % len(CORE_TEMPLATES)]
-        tech = TECH_VARIANTS[i % len(TECH_VARIANTS)]
-        tag = style_tags[i % len(style_tags)] if style_tags else ""
-        prompt = f"{core}{tech}{tag}; {BASE_REAL}"
-        out.append(prompt)
-        i += 1
-    return out
-
-# Стилистические тэги по разделам (муж/жен). Сохраняем ваши группы и названия.
+# ====== МУЖЧИНЫ (40) ======
+# Категории и стилистические маркеры с явным male-уклоном.
 MEN_STYLE_TAGS = {
     "business": [
-        "executive presence, tailored suit, polished shoes, subtle tie knot",
-        "glass tower reflections, corporate office backdrop",
-        "sleek boardroom, panoramic city skyline",
-        "luxury watch close-up, cufflinks detail",
-        "rooftop lounge, sunset over financial district",
+        "adult male, masculine features, clean shave or short beard, tailored suit, tie/cufflinks",
+        "male executive aura, corporate office backdrop, glass reflections",
+        "male portrait, boardroom, skyline in background, luxury watch detail",
+        "masculine posture, rooftop lounge near financial district",
+        "male model, monochrome socks & polished oxford shoes subtle",
     ],
     "fitness": [
-        "athletic definition, sweat sheen, gym backplates",
-        "boxing ring ropes bokeh, chalk dust particles",
-        "outdoor run breath in cold air, motion blur tastefully",
-        "yoga rooftop sunrise, balanced pose",
-        "swimming pool water beads, wet hair detail",
+        "athletic adult male, defined musculature, sweat sheen, gym background",
+        "male boxer stance, wraps visible, gritty ambience",
+        "male runner outdoors, visible breath in cold air",
+        "male yoga pose on rooftop at sunrise",
+        "male swimmer exiting pool, water droplets, wet hair",
     ],
     "luxury lifestyle": [
-        "penthouse interior bokeh, city lights at night",
-        "private jet cabin, champagne glass highlight",
-        "supercar reflections, glossy paint",
-        "villa terrace, infinity pool horizon",
-        "marble textures, designer accessories",
+        "male in penthouse, night city bokeh, whiskey glass",
+        "adult male inside private jet, designer outfit",
+        "male with supercar, glossy paint reflections",
+        "male at villa terrace with infinity pool",
+        "male entrepreneur on balcony with skyline",
     ],
     "travel": [
-        "Eiffel Tower distant bokeh, Parisian street",
-        "Brooklyn Bridge cables lines, sunset haze",
-        "Swiss Alps snow caps, crisp air clarity",
-        "Istanbul old town textures, morning light",
-        "Mediterranean yacht deck, wind in hair",
+        "male tourist in Paris street, Eiffel bokeh",
+        "male on Brooklyn Bridge at sunset",
+        "male hiker in Swiss Alps, snow peaks",
+        "male enjoying coffee in Istanbul, morning light",
+        "male on yacht deck, Mediterranean wind",
     ],
     "studio portrait": [
-        "dark gray seamless background, three-point lighting",
-        "classic low-key portrait, high contrast edges",
-        "black-and-white conversion, tonal richness",
-        "headshot crop for corporate profile",
-        "traditional attire, warm key light",
+        "male head & shoulders on dark seamless, crisp edge light",
+        "male classic low-key portrait, high contrast",
+        "male BW studio, strong jawline definition",
+        "male corporate headshot frame",
+        "male traditional attire, warm key",
     ],
 }
 
+# Планы кадра добавляем в шаблоны
+MEN_FRAMING = [
+    "head-and-shoulders portrait",
+    "half-body portrait (mid-shot)",
+    "three-quarter body portrait",
+    "full-body fashion shot",
+]
+
+# Собираем 8 промптов на категорию = 40
+def _build_men_prompts() -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for cat, tags in MEN_STYLE_TAGS.items():
+        items: List[str] = []
+        i = 0
+        while len(items) < 8:
+            t = tags[i % len(tags)]
+            f = MEN_FRAMING[i % len(MEN_FRAMING)]
+            l = LIGHT[i % len(LIGHT)]
+            o = OPTICS[i % len(OPTICS)]
+            # Никаких "female", наоборот — подчёркиваем male.
+            prompt = (
+                f"{f}, {t}, {l}, {o}, {RETREAL}. "
+                "male subject only, masculine styling, no female figure."
+            )
+            items.append(prompt)
+            i += 1
+        out[cat] = items
+    return out
+
+# ====== ЖЕНЩИНЫ (250) — сохраняем прежние группы и добавляем разнообразие планов ======
 WOMEN_STYLE_TAGS = {
     "fashion": [
-        "Fifth Avenue stride, designer dress flow",
-        "Milan Duomo stones, editorial posture",
-        "Parisian beret and trench, chic stance",
-        "Dubai Marina neon reflections, evening glow",
-        "glossy lips and subtle eyeliner, couture vibe",
+        "female fashion model, couture vibe, runway poise",
+        "editorial female pose near Duomo/Milan",
+        "Paris street chic, trench and beret (female)",
+        "Dubai Marina evening glamour (female)",
+        "female beauty accents: glossy lips, subtle eyeliner",
     ],
     "beach": [
-        "Maldives turquoise, wet hair sheen",
-        "Miami sunrise walk, sand texture",
-        "Bali palms sway, towel pattern",
-        "Santorini whites and blues, breeze",
-        "infinity pool mirror water, sun-kissed skin",
+        "female at Maldives shoreline, wet hair sheen",
+        "female walk at Miami sunrise, sand texture",
+        "female on Bali towel, palms swaying",
+        "female in Santorini whites and blues",
+        "female in infinity pool, sun-kissed skin",
     ],
     "luxury lifestyle": [
-        "Rolls-Royce grill reflection, gold gown",
-        "private jet aisle, designer handbag",
-        "LA villa palms, golden hour",
-        "Monaco yachts, shallow DOF",
-        "NYC penthouse balcony, city bokeh",
+        "female with Rolls-Royce, evening gown",
+        "female inside private jet, designer handbag",
+        "female at LA villa, gold hour",
+        "female near Monaco yachts, shallow DOF",
+        "female on NYC penthouse balcony, city bokeh",
     ],
     "fitness": [
-        "Dubai luxury gym, tight sportswear",
-        "Central Park runner glow, motion hint",
-        "Bali cliff yoga, ocean backdrop",
-        "dim boxing gym, gritty rim light",
-        "pool exit droplets, slicked hair",
+        "female in Dubai luxury gym, tight sportswear",
+        "female runner in Central Park, motion hint",
+        "female yoga on Bali cliff, ocean backdrop",
+        "female boxer in dim gym, gritty rim light",
+        "female exiting pool, slicked hair",
     ],
     "party": [
-        "neon club haze, reflective sequins",
-        "rooftop party skyline, champagne",
-        "Dubai lounge, warm amber lights",
-        "NYC bar counter, glass highlights",
-        "villa balloons, glitter makeup",
+        "female in neon club haze, reflective sequins",
+        "female at rooftop party, champagne",
+        "female in Dubai lounge, warm amber lights",
+        "female at NYC bar counter, glass highlights",
+        "female villa party, glitter makeup",
     ],
     "travel": [
-        "Istanbul Grand Bazaar colors, textiles",
-        "Brooklyn Bridge sunset, flowing hair",
-        "Swiss Alps trek, crisp blue air",
-        "Paris café cup steam, bistro chairs",
-        "Venice gondola wake, romantic tone",
+        "female at Istanbul Grand Bazaar, textiles",
+        "female on Brooklyn Bridge at sunset",
+        "female in Swiss Alps trek, crisp air",
+        "female at Paris café, bistro ambiance",
+        "female on Venice gondola, romantic tone",
     ],
     "studio portrait": [
-        "beauty dish catchlights, smooth gradient",
-        "dramatic split light, smoky eye",
-        "macro lashes detail, 85mm look",
-        "BW fashion angle, sharp cheekbones",
-        "cinematic palette, soft roll-off",
+        "female beauty dish catchlights, smooth gradient",
+        "female dramatic split light, smoky eye",
+        "female macro lashes detail, 85mm look",
+        "female BW fashion angle, cheekbones",
+        "female cinematic palette, soft roll-off",
     ],
     "luxury cars": [
-        "Lamborghini side panel gloss, stance",
-        "Ferrari badge close-up, golden hour",
-        "Rolls-Royce interior stitch detail",
-        "Porsche street scene, clean lines",
-        "driver seat portrait, dashboard glow",
+        "female near Lamborghini gloss panel",
+        "female near Ferrari badge at golden hour",
+        "female in Rolls interior stitch detail",
+        "female with Porsche street scene",
+        "female in car interior, dashboard glow",
     ],
     "villa lifestyle": [
-        "Bali villa breakfast, morning sun",
-        "garden dappled light, linen dress",
-        "Santorini balcony rail, sea view",
-        "poolside champagne, ripple highlights",
-        "terrace wicker furniture, calm vibe",
+        "female Bali villa breakfast, morning sun",
+        "female garden dappled light, linen dress",
+        "female on Santorini balcony, sea view",
+        "female poolside champagne, ripples",
+        "female terrace wicker furniture, calm",
     ],
 }
 
-# Распределяем количество промптов по разделам.
-# Мужчины: 5 разделов * 8 = 40
-MEN_COUNTS = {k: 8 for k in MEN_STYLE_TAGS.keys()}
+WOMEN_FRAMING = [
+    "head-and-shoulders",
+    "half-body (mid-shot)",
+    "three-quarter body",
+    "full-body fashion shot",
+]
 
-# Женщины: всего 250. Сделаем 7 разделов по 28 и 2 раздела по 27 (28*7 + 27*2 = 250)
-_women_keys = list(WOMEN_STYLE_TAGS.keys())
-WOMEN_COUNTS: Dict[str, int] = {}
-for i, k in enumerate(_women_keys):
-    WOMEN_COUNTS[k] = 28 if i < 7 else 27
+# распределение 28/28/28/28/28/28/28/27/27 = 250
+def _women_counts():
+    keys = list(WOMEN_STYLE_TAGS.keys())
+    counts: Dict[str, int] = {}
+    for i, k in enumerate(keys):
+        counts[k] = 28 if i < 7 else 27
+    return counts
 
-# Сборка источника промптов в прежней структуре (men/women -> категории -> список строк)
-def _build_prompts_source() -> Dict[str, Dict[str, List[str]]]:
-    men: Dict[str, List[str]] = {}
-    for cat, tags in MEN_STYLE_TAGS.items():
-        men[cat] = _mix_prompts(MEN_COUNTS[cat], tags)
-
-    women: Dict[str, List[str]] = {}
+def _build_women_prompts() -> Dict[str, List[str]]:
+    counts = _women_counts()
+    out: Dict[str, List[str]] = {}
     for cat, tags in WOMEN_STYLE_TAGS.items():
-        women[cat] = _mix_prompts(WOMEN_COUNTS[cat], tags)
+        need = counts[cat]
+        items: List[str] = []
+        i = 0
+        while len(items) < need:
+            t = tags[i % len(tags)]
+            f = WOMEN_FRAMING[i % len(WOMEN_FRAMING)]
+            l = LIGHT[i % len(LIGHT)]
+            o = OPTICS[i % len(OPTICS)]
+            prompt = (
+                f"{f}, {t}, {l}, {o}, {RETREAL}. "
+                "female subject only, feminine styling, no male figure."
+            )
+            items.append(prompt)
+            i += 1
+        out[cat] = items
+    return out
 
-    return {"men": men, "women": women}
-
-PROMPTS_SOURCE = _build_prompts_source()
+PROMPTS_SOURCE = {
+    "men": _build_men_prompts(),
+    "women": _build_women_prompts(),
+}
 
 # Локализация заголовков меню для категорий (русские названия + эмодзи)
 MEN_TITLES = {
@@ -251,6 +272,7 @@ class UserState:
     first_seen_ts: float = field(default_factory=lambda: time.time())
     flash_sent: bool = False
     paid_any: bool = False
+    gender_pref: Optional[str] = None  # ← запоминаем выбор пола
 
 def _load_db() -> Dict[str, Any]:
     if not os.path.exists(DB_PATH):
@@ -351,6 +373,12 @@ def kb_examples() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
     ])
 
+def kb_pay_actions(payment_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"paycheck:{payment_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+    ])
+
 # ================== APP WRAPPER ==================
 class TgApp:
     def __init__(self):
@@ -448,6 +476,26 @@ class TgApp:
         except Exception as e:
             await update.effective_message.reply_text(f"⚠️ Ошибка статистики: {e!r}")
 
+    async def _start_payment(self, uid: int, qty: int, amount_rub: int, title: str):
+        """Создаём платёж через backend, получаем ссылку и показываем пользователю."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as cl:
+                r = await cl.post(f"{BACKEND_ROOT}/api/pay", json={
+                    "user_id": uid,
+                    "qty": qty,
+                    "amount": amount_rub,
+                    "title": title
+                })
+                r.raise_for_status()
+                data = r.json()
+        except Exception as e:
+            return None, f"❌ Ошибка инициализации оплаты: {e!r}"
+        url = data.get("confirmation_url")
+        pid = data.get("payment_id")
+        if not url or not pid:
+            return None, "❌ Не удалось получить ссылку на оплату."
+        return (url, pid), None
+
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
         uid = q.from_user.id
@@ -473,7 +521,7 @@ class TgApp:
                     f"• 20 генераций — <s>{PRICES['20']} ₽</s> <b>{int(round(PRICES['20']*0.9))} ₽</b>\n"
                     f"• 40 генераций — <s>{PRICES['40']} ₽</s> <b>{int(round(PRICES['40']*0.9))} ₽</b>\n"
                     f"• 70 генераций — <s>{PRICES['70']} ₽</s> <b>{int(round(PRICES['70']*0.9))} ₽</b>\n\n"
-                    "Выбирай пакет и начинаем!"
+                    "Выбирай пакет и оформляй оплату — генерации начислим сразу после подтверждения."
                 )
             else:
                 text = (
@@ -481,53 +529,33 @@ class TgApp:
                     f"• 20 генераций — <b>{PRICES['20']} ₽</b>\n"
                     f"• 40 генераций — <b>{PRICES['40']} ₽</b>\n"
                     f"• 70 генераций — <b>{PRICES['70']} ₽</b>\n\n"
-                    "Выбирай пакет и начинаем!"
+                    "Выбирай пакет и оформляй оплату — генерации начислим сразу после подтверждения."
                 )
-            await q.message.reply_text(text, reply_markup=kb_tariffs(discounted), parse_mode=ParseMode.HTML)
+            await q.message.reply_text(text, reply_markup=kb_tariffs(bool(st.referred_by)), parse_mode=ParseMode.HTML)
             return
 
         if data in ("buy_20", "buy_40", "buy_70"):
             qty = int(data.split("_")[1])
-            price = PRICES[str(qty)]
-            if st.referred_by:
-                price = int(round(price * 0.9))
-
-            st.balance += qty
-            st.paid_any = True
-            save_user(st)
-
-            # Реф-начисления
-            if st.referred_by:
-                ref = get_user(st.referred_by)
-                ref_gain = round(price * 0.20, 2)
-                ref.ref_earn_total += ref_gain
-                ref.ref_earn_ready += ref_gain
-                save_user(ref)
-
-            # Если модель уже есть — сразу в генерации (без просьбы загрузить фото)
-            if st.has_model:
-                await q.message.reply_text(
-                    f"✅ Оплата прошла. Начислено: <b>{qty}</b> генераций.\n\n"
-                    "Готово! Переходим к генерациям — выбери раздел:",
-                    reply_markup=kb_gender(), parse_mode=ParseMode.HTML
-                )
-            else:
-                # Нет модели — отправляем требования и кнопку «Фото загружены»
-                await q.message.reply_text(
-                    "✅ Оплата прошла. Начислено: <b>{qty}</b> генераций.\n\n"
-                    "📥 <b>Требования к фото для обучения</b>\n"
-                    "• От <b>20</b> до <b>50</b> фотографий (лучше 25–35)\n"
-                    "• Разные ракурсы: фронтально, 3/4, профиль, разные фоны и освещение\n"
-                    "• <b>Без</b> солнцезащитных очков, кепок/шапок, масок, сильных фильтров\n"
-                    "• Реальная мимика: с улыбкой и нейтрально\n"
-                    "• Чистые фото, без сильного шума и размытий\n\n"
-                    "Когда закончишь — нажми «Фото загружены».",
-                    reply_markup=kb_upload_fixed(), parse_mode=ParseMode.HTML
-                )
+            base_price = PRICES[str(qty)]
+            price = int(round(base_price * 0.9)) if st.referred_by else base_price
+            info, err = await self._start_payment(uid, qty, price, f"{qty} генераций")
+            if err:
+                await q.message.reply_text(err); return
+            pay_url, pid = info
+            await q.message.reply_text(
+                f"🧾 К оплате: <b>{price} ₽</b>\nПакет: <b>{qty}</b> генераций.\n\n"
+                "Нажми «Оплатить», затем «✅ Я оплатил(а)» для проверки.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+                    [InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"paycheck:{pid}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
             return
 
         if data == "photos_done":
-            # Одна модель на аккаунт — повторно не запускаем
+            # Одна модель на аккаунт — пресекаем повторный запуск
             if st.has_model:
                 await q.message.reply_text(
                     "ℹ️ На аккаунте уже есть обученная модель.\n"
@@ -539,14 +567,19 @@ class TgApp:
             return
 
         if data == "gen_menu":
-            if not st.paid_any:
+            if not st.paid_any and st.balance <= 0:
                 await q.message.reply_text("Сначала приобретите пакет.", reply_markup=kb_buy_or_back()); return
             if not st.has_model:
                 await q.message.reply_text("⏳ Модель ещё обучается или не создана. Мы напишем, когда она будет готова."); return
+            # если пол уже выбран — сразу показываем его разделы
+            if st.gender_pref in ("men", "women"):
+                await q.message.reply_text("Выберите стиль:", reply_markup=kb_categories(st.gender_pref)); return
             await q.message.reply_text("Выбери раздел:", reply_markup=kb_gender()); return
 
         if data.startswith("g:"):
             gender = data.split(":")[1]
+            st.gender_pref = gender  # ← запомнили один раз
+            save_user(st)
             await q.message.reply_text(("🧔 Мужские разделы:" if gender=="men" else "👩 Женские разделы:"),
                                        reply_markup=kb_categories(gender)); return
 
@@ -568,9 +601,50 @@ class TgApp:
                 await context.bot.send_message(chat_id=uid, text="❌ Ошибка при генерации. Попробуйте ещё раз.")
                 return
             st.balance -= 3; save_user(st)
-            media = [InputMediaPhoto(imgs[0], caption=f"Готово! Баланс: {st.balance}")] + [InputMediaPhoto(u) for u in imgs[1:]]
+            media = [InputMediaPhoto(imgs[0], caption=f"Готово! Списано: 3. Остаток: <b>{st.balance}</b>")] + [InputMediaPhoto(u) for u in imgs[1:]]
             await context.bot.send_media_group(chat_id=uid, media=media)
-            await context.bot.send_message(chat_id=uid, text="Ещё стиль?", reply_markup=kb_gender())
+            # повторно НЕ спрашиваем пол — открываем сохранённый раздел
+            if st.gender_pref in ("men", "women"):
+                await context.bot.send_message(chat_id=uid, text="Ещё стиль?", reply_markup=kb_categories(st.gender_pref))
+            else:
+                await context.bot.send_message(chat_id=uid, text="Ещё стиль?", reply_markup=kb_gender())
+            return
+
+        if data.startswith("paycheck:"):
+            payment_id = data.split(":", 1)[1]
+            try:
+                async with httpx.AsyncClient(timeout=20) as cl:
+                    r = await cl.get(f"{BACKEND_ROOT}/api/pay/status", params={"payment_id": payment_id})
+                    r.raise_for_status()
+                    d = r.json()
+            except Exception:
+                await q.message.reply_text("⏳ Платёж ещё не подтверждён. Попробуйте через минуту."); return
+
+            status = (d.get("status") or "").lower()
+            if status != "succeeded":
+                await q.message.reply_text("⏳ Платёж ещё не подтверждён. Попробуйте позже."); return
+
+            # сервер сам начисляет и сам присылает уведомление; но на всякий — покажем стейт
+            st = get_user(uid)
+            await q.message.reply_text(
+                f"✅ Платёж подтверждён. Текущий баланс: <b>{st.balance}</b>.",
+                parse_mode=ParseMode.HTML
+            )
+            # и сразу в генерации
+            if st.has_model:
+                if st.gender_pref in ("men", "women"):
+                    await q.message.reply_text("Выберите стиль:", reply_markup=kb_categories(st.gender_pref))
+                else:
+                    await q.message.reply_text("Выберите раздел:", reply_markup=kb_gender())
+            else:
+                await q.message.reply_text(
+                    "📥 <b>Требования к фото для обучения</b>\n"
+                    "• 20–50 фотографий (лучше 25–35)\n"
+                    "• Разные ракурсы/фоны/освещение\n"
+                    "• Без очков/кепок/масок/сильных фильтров\n\n"
+                    "Когда закончишь — нажми «Фото загружены».",
+                    reply_markup=kb_upload_fixed(), parse_mode=ParseMode.HTML
+                )
             return
 
         if data == "account":
@@ -640,27 +714,23 @@ class TgApp:
             ); return
 
         if data == "buy_flash_50":
-            st.balance += FLASH_OFFER["qty"]
-            st.paid_any = True
-            save_user(st)
-            # Если модель есть — сразу к генерациям
-            if st.has_model:
-                await q.message.reply_text(
-                    f"✅ Начислено {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.\n\n"
-                    "Переходим к генерациям — выбери раздел:",
-                    reply_markup=kb_gender(), parse_mode=ParseMode.HTML
-                )
-            else:
-                await q.message.reply_text(
-                    f"✅ Начислено {FLASH_OFFER['qty']} генераций за {FLASH_OFFER['price']} ₽.\n\n"
-                    "📥 <b>Требования к фото для обучения</b>\n"
-                    "• От <b>20</b> до <b>50</b> фотографий (лучше 25–35)\n"
-                    "• Разные ракурсы и сцены, различные освещения\n"
-                    "• <b>Без</b> очков/кепок/масок, без сильных фильтров\n"
-                    "• Файлы чистые и чёткие\n\n"
-                    "Когда закончишь — нажми «Фото загружены».",
-                    reply_markup=kb_upload_fixed(), parse_mode=ParseMode.HTML
-                )
+            # спец-предложение: создаём платёж на фикс. цену
+            qty = FLASH_OFFER["qty"]
+            price = FLASH_OFFER["price"]
+            info, err = await self._start_payment(uid, qty, price, f"{qty} генераций (Акция 24ч)")
+            if err:
+                await q.message.reply_text(err); return
+            pay_url, pid = info
+            await q.message.reply_text(
+                f"🔥 Акция 24ч: <b>{qty}</b> генераций за <b>{price} ₽</b>.\n\n"
+                "Нажми «Оплатить», затем «✅ Я оплатил(а)» для проверки.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+                    [InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"paycheck:{pid}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
             return
 
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
