@@ -1,5 +1,5 @@
 # main.py
-import os, io, zipfile, uuid, time, logging, asyncio, base64
+import os, io, zipfile, uuid, time, logging, asyncio, base64, json
 from typing import Dict, Any, Optional, List, Tuple
 
 import httpx
@@ -36,7 +36,6 @@ FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 # ---------- YOOKASSA (PAYMENTS) ----------
 YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
-# База API и прокси можно задать из ENV (для обхода сетевых блокировок)
 YOOKASSA_API_BASE = (os.getenv("YOOKASSA_API_BASE") or "https://api.yookassa.ru").rstrip("/")
 
 logging.basicConfig(level=logging.INFO)
@@ -59,13 +58,11 @@ def _pay_db_load() -> Dict[str, Any]:
         return {}
     try:
         with open(PAY_DB_PATH, "r", encoding="utf-8") as f:
-            import json
             return json.load(f)
     except Exception:
         return {}
 
 def _pay_db_save(db: Dict[str, Any]) -> None:
-    import json
     tmp = PAY_DB_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
@@ -285,7 +282,6 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
     urls_and_payloads.append({"url": f"https://api.replicate.com/v1/models/{owner}/{model}/versions/{version_hash}/trainings", "payload": p3})
 
     async with httpx.AsyncClient(timeout=180) as cl:
-        last_text, last_code = "", 0
         for attempt, item in enumerate(urls_and_payloads, 1):
             try:
                 r = await cl.post(item["url"], headers=headers, json=item["payload"])
@@ -294,10 +290,10 @@ async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str
                 r.raise_for_status()
                 return r.json()
             except httpx.HTTPStatusError as e:
-                last_text, last_code = e.response.text, e.response.status_code
+                last_code = e.response.status_code
                 if last_code == 404:
                     continue
-                raise HTTPException(status_code=500, detail=f"replicate train failed ({last_code}): {last_text}")
+                raise HTTPException(status_code=500, detail=f"replicate train failed ({last_code}): {e.response.text}")
             except Exception:
                 continue
 
@@ -424,7 +420,7 @@ async def _notify_user_credit(user_id: int, qty: int, amount: int):
     except Exception as e:
         log.warning(f"notify user failed: {e!r}")
 
-# принимает JSON/FORM + увеличенные таймауты, ретраи, http2 выключен, trust_env включён (исп. HTTPS_PROXY если задан)
+# принимает JSON/FORM + таймауты/ретраи/прокси
 @app.post("/api/pay")
 async def api_pay_create(request: Request):
     """
@@ -596,7 +592,8 @@ async def api_generate(
     num_images: Optional[int] = Form(None),
     job_id: Optional[str] = Form(None),
 ):
-    if request.headers.get("content-type", "").lower().startswith("application/json"):
+    # поддержка application/json
+    if (request.headers.get("content-type") or "").lower().startswith("application/json"):
         body = await request.json()
         user_id = body.get("user_id")
         prompt = body.get("prompt")
@@ -606,9 +603,19 @@ async def api_generate(
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    # 1) если есть job -> берём модель из jobs
     model_id = None
     if job_id and job_id in jobs:
         model_id = jobs[job_id].get("model_id")
 
-    urls = await call_replicate_generate(prompt=prompt, model_id=model_id, num_images=int(num_images or 1))
+    # 2) если job нет/утерян — пробуем модель пользователя из персистентной БД
+    if not model_id and user_id:
+        try:
+            st = get_user(int(user_id))
+            if st and getattr(st, "model_id", None):
+                model_id = st.model_id
+        except Exception:
+            pass
+
+    urls = await call_replicate_generate(prompt=prompt, model_id=(model_id or None), num_images=int(num_images or 1))
     return {"images": urls}
