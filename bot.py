@@ -329,7 +329,8 @@ def kb_categories(gender: str) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for title in cats:
         rows.append([InlineKeyboardButton(title, callback_data=f"cat:{gender}:{title}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="gen_menu")])
+    # 👉 назад теперь ведёт в главное меню
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_home")])
     return InlineKeyboardMarkup(rows)
 
 def kb_prompts(gender: str, cat: str) -> InlineKeyboardMarkup:
@@ -425,12 +426,16 @@ class TgApp:
                 except Exception:
                     pass
 
+        # 🔥 Больше продающего текста на стартовом экране
         text = (
-            "👋 <b>Привет!</b> Это <b>PhotoFly</b> — персональная фотостудия с ИИ.\n\n"
-            "1) Покупаешь пакет генераций\n"
-            "2) Загружаешь 20–50 фото для обучения\n"
-            "3) Получаешь реалистичные портреты по темам и стилям\n\n"
-            "Нажми «🎯 Попробовать», чтобы выбрать тариф."
+            "👋 <b>Привет!</b> Это <b>PhotoFly</b> — твоя персональная фотостудия с ИИ.\n\n"
+            "Создавай живые портреты в модных стилях: от fashion-съёмок до бомбических travel-кадров. "
+            "Без студии, без фотографа — результат за минуту.\n\n"
+            "Что получишь:\n"
+            "• Реалистичную кожу и свет — без «пластика»\n"
+            "• Десятки сценариев съёмки и ракурсов\n"
+            "• 3 кадра за одну генерацию\n\n"
+            "Выбирай пакет — и полетели! Нажми «🎯 Попробовать»."
         )
         await update.effective_message.reply_text(text, reply_markup=kb_home(st.paid_any), parse_mode=ParseMode.HTML)
 
@@ -586,7 +591,8 @@ class TgApp:
                 await context.bot.send_message(chat_id=uid, text="❌ Ошибка при генерации. Попробуйте ещё раз.")
                 return
             st.balance -= 3; save_user(st)
-            media = [InputMediaPhoto(imgs[0], caption=f"Готово! Списано: 3. Остаток: <b>{st.balance}</b>")] + [InputMediaPhoto(u) for u in imgs[1:]]
+            # 👉 добавили parse_mode=HTML в первый элемент, чтобы <b>...</b> не печатался текстом
+            media = [InputMediaPhoto(imgs[0], caption=f"Готово! Списано: 3. Остаток: <b>{st.balance}</b>", parse_mode=ParseMode.HTML)] + [InputMediaPhoto(u) for u in imgs[1:]]
             await context.bot.send_media_group(chat_id=uid, media=media)
             if st.gender_pref in ("men", "women"):
                 await context.bot.send_message(chat_id=uid, text="Ещё стиль?", reply_markup=kb_categories(st.gender_pref))
@@ -674,12 +680,35 @@ class TgApp:
             ); return
 
         if data == "ref_list":
-            await q.message.reply_text(
-                "👥 <b>Мои рефералы</b>\n\n"
-                "Отображение списка в разработке. Пока доступна статистика доходов и ссылка.\n"
-                "Продолжай делиться — это окупает генерации! ✨",
-                reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML
-            ); return
+            # 👉 Реальное отображение рефералов
+            refs: List[Dict[str, Any]] = []
+            for k, v in DB.items():
+                try:
+                    if int(v.get("referred_by") or 0) == uid:
+                        refs.append({
+                            "id": int(k),
+                            "paid": bool(v.get("paid_any")),
+                            "balance": int(v.get("balance") or 0),
+                            "first_seen_ts": float(v.get("first_seen_ts") or 0.0),
+                        })
+                except Exception:
+                    continue
+            refs.sort(key=lambda x: x.get("first_seen_ts") or 0, reverse=True)
+
+            if not refs:
+                text = (
+                    "👥 <b>Мои рефералы</b>\n\n"
+                    "Пока приглашённых нет.\n\n"
+                    "Продолжай делиться — это окупает генерации! ✨"
+                )
+            else:
+                lines = [f"👥 <b>Мои рефералы</b>\n", f"Всего: <b>{len(refs)}</b>\n"]
+                for i, r in enumerate(refs[:50], 1):
+                    status = "оплатил(а)" if r["paid"] else "без оплаты"
+                    lines.append(f"{i}. <code>{r['id']}</code> — {status}, баланс: {r['balance']}")
+                lines.append("\nПродолжай делиться — это окупает генерации! ✨")
+                text = "\n".join(lines)
+            await q.message.reply_text(text, reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
 
         if data == "ref_payout":
             await q.message.reply_text(
