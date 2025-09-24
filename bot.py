@@ -36,7 +36,6 @@ FLASH_OFFER = {"qty": 50, "price": 390}  # 50 генераций — 390₽
 # Для мужчин — явные male-маркеры, мужская внешность/гардероб/поза.
 # Планы: head & shoulders / half-body / three-quarter / full-body.
 
-# Общие строительные блоки
 RETREAL = (
     "realistic photographic look, natural color science, subtle skin retouch (~50%), "
     "pores and tiny imperfections preserved, no plastic smoothing"
@@ -52,7 +51,6 @@ LIGHT = [
 ]
 
 # ====== МУЖЧИНЫ (40) ======
-# Категории и стилистические маркеры с явным male-уклоном.
 MEN_STYLE_TAGS = {
     "business": [
         "adult male, masculine features, clean shave or short beard, tailored suit, tie/cufflinks",
@@ -90,16 +88,12 @@ MEN_STYLE_TAGS = {
         "male traditional attire, warm key",
     ],
 }
-
-# Планы кадра добавляем в шаблоны
 MEN_FRAMING = [
     "head-and-shoulders portrait",
     "half-body portrait (mid-shot)",
     "three-quarter body portrait",
     "full-body fashion shot",
 ]
-
-# Собираем 8 промптов на категорию = 40
 def _build_men_prompts() -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
     for cat, tags in MEN_STYLE_TAGS.items():
@@ -110,7 +104,6 @@ def _build_men_prompts() -> Dict[str, List[str]]:
             f = MEN_FRAMING[i % len(MEN_FRAMING)]
             l = LIGHT[i % len(LIGHT)]
             o = OPTICS[i % len(OPTICS)]
-            # Никаких "female", наоборот — подчёркиваем male.
             prompt = (
                 f"{f}, {t}, {l}, {o}, {RETREAL}. "
                 "male subject only, masculine styling, no female figure."
@@ -120,7 +113,7 @@ def _build_men_prompts() -> Dict[str, List[str]]:
         out[cat] = items
     return out
 
-# ====== ЖЕНЩИНЫ (250) — сохраняем прежние группы и добавляем разнообразие планов ======
+# ====== ЖЕНЩИНЫ (250) ======
 WOMEN_STYLE_TAGS = {
     "fashion": [
         "female fashion model, couture vibe, runway poise",
@@ -186,22 +179,18 @@ WOMEN_STYLE_TAGS = {
         "female terrace wicker furniture, calm",
     ],
 }
-
 WOMEN_FRAMING = [
     "head-and-shoulders",
     "half-body (mid-shot)",
     "three-quarter body",
     "full-body fashion shot",
 ]
-
-# распределение 28/28/28/28/28/28/28/27/27 = 250
 def _women_counts():
     keys = list(WOMEN_STYLE_TAGS.keys())
     counts: Dict[str, int] = {}
     for i, k in enumerate(keys):
         counts[k] = 28 if i < 7 else 27
     return counts
-
 def _build_women_prompts() -> Dict[str, List[str]]:
     counts = _women_counts()
     out: Dict[str, List[str]] = {}
@@ -228,7 +217,6 @@ PROMPTS_SOURCE = {
     "women": _build_women_prompts(),
 }
 
-# Локализация заголовков меню для категорий (русские названия + эмодзи)
 MEN_TITLES = {
     "business": "💼 Бизнес / офис",
     "fitness": "🏃‍♂️ Фитнес / спорт",
@@ -248,7 +236,6 @@ WOMEN_TITLES = {
     "villa lifestyle": "🏡 Вилла / lifestyle",
 }
 
-# Строим каталоги для кнопок
 MEN_CATALOG: Dict[str, List[str]] = {MEN_TITLES[k]: v for k, v in PROMPTS_SOURCE["men"].items()}
 WOMEN_CATALOG: Dict[str, List[str]] = {WOMEN_TITLES[k]: v for k, v in PROMPTS_SOURCE["women"].items()}
 
@@ -272,7 +259,7 @@ class UserState:
     first_seen_ts: float = field(default_factory=lambda: time.time())
     flash_sent: bool = False
     paid_any: bool = False
-    gender_pref: Optional[str] = None  # ← запоминаем выбор пола
+    gender_pref: Optional[str] = None
 
 def _load_db() -> Dict[str, Any]:
     if not os.path.exists(DB_PATH):
@@ -451,7 +438,7 @@ class TgApp:
         """Админская статистика: /stats (ADMIN_ID)"""
         u = update.effective_user
         if not u or u.id != ADMIN_ID:
-            return  # молча игнорируем не-админов
+            return
         try:
             users_count = len(DB)
             balances = sum((DB[k].get("balance", 0) or 0) for k in DB)
@@ -502,7 +489,6 @@ class TgApp:
         st = get_user(uid)
         data = q.data or ""
 
-        # Навигация
         if data == "back_home":
             await q.message.reply_text("📍 Главное меню", reply_markup=kb_home(st.paid_any))
             return
@@ -555,7 +541,6 @@ class TgApp:
             return
 
         if data == "photos_done":
-            # Одна модель на аккаунт — пресекаем повторный запуск
             if st.has_model:
                 await q.message.reply_text(
                     "ℹ️ На аккаунте уже есть обученная модель.\n"
@@ -571,14 +556,13 @@ class TgApp:
                 await q.message.reply_text("Сначала приобретите пакет.", reply_markup=kb_buy_or_back()); return
             if not st.has_model:
                 await q.message.reply_text("⏳ Модель ещё обучается или не создана. Мы напишем, когда она будет готова."); return
-            # если пол уже выбран — сразу показываем его разделы
             if st.gender_pref in ("men", "women"):
                 await q.message.reply_text("Выберите стиль:", reply_markup=kb_categories(st.gender_pref)); return
             await q.message.reply_text("Выбери раздел:", reply_markup=kb_gender()); return
 
         if data.startswith("g:"):
             gender = data.split(":")[1]
-            st.gender_pref = gender  # ← запомнили один раз
+            st.gender_pref = gender
             save_user(st)
             await q.message.reply_text(("🧔 Мужские разделы:" if gender=="men" else "👩 Женские разделы:"),
                                        reply_markup=kb_categories(gender)); return
@@ -603,7 +587,6 @@ class TgApp:
             st.balance -= 3; save_user(st)
             media = [InputMediaPhoto(imgs[0], caption=f"Готово! Списано: 3. Остаток: <b>{st.balance}</b>")] + [InputMediaPhoto(u) for u in imgs[1:]]
             await context.bot.send_media_group(chat_id=uid, media=media)
-            # повторно НЕ спрашиваем пол — открываем сохранённый раздел
             if st.gender_pref in ("men", "women"):
                 await context.bot.send_message(chat_id=uid, text="Ещё стиль?", reply_markup=kb_categories(st.gender_pref))
             else:
@@ -624,13 +607,11 @@ class TgApp:
             if status != "succeeded":
                 await q.message.reply_text("⏳ Платёж ещё не подтверждён. Попробуйте позже."); return
 
-            # сервер сам начисляет и сам присылает уведомление; но на всякий — покажем стейт
             st = get_user(uid)
             await q.message.reply_text(
                 f"✅ Платёж подтверждён. Текущий баланс: <b>{st.balance}</b>.",
                 parse_mode=ParseMode.HTML
             )
-            # и сразу в генерации
             if st.has_model:
                 if st.gender_pref in ("men", "women"):
                     await q.message.reply_text("Выберите стиль:", reply_markup=kb_categories(st.gender_pref))
@@ -714,7 +695,6 @@ class TgApp:
             ); return
 
         if data == "buy_flash_50":
-            # спец-предложение: создаём платёж на фикс. цену
             qty = FLASH_OFFER["qty"]
             price = FLASH_OFFER["price"]
             info, err = await self._start_payment(uid, qty, price, f"{qty} генераций (Акция 24ч)")
@@ -751,13 +731,11 @@ class TgApp:
                     r = await cl.post(f"{BACKEND_ROOT}/api/upload_photo", data=data, files=files)
                     r.raise_for_status()
         except Exception:
-            # Молча игнорируем единичные сбои, чтобы не спамить
             pass
 
     # ---------- HELPERS ----------
     async def _launch_training_and_wait(self, uid: int, context: ContextTypes.DEFAULT_TYPE):
         st = get_user(uid)
-        # Одна модель на аккаунт — пресекаем повторный запуск
         if st.has_model:
             await context.bot.send_message(chat_id=uid, text="ℹ️ Модель уже обучена. Переходим к генерациям:", reply_markup=kb_gender())
             return
@@ -832,7 +810,6 @@ class TgApp:
                     st = UserState(**v)
                     if st.flash_sent:
                         continue
-                    # 24 часа после первого взаимодействия
                     if now - (st.first_seen_ts or now) >= 24 * 3600:
                         await self._send_flash_offer(st.id)
                         st.flash_sent = True
