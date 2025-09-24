@@ -296,7 +296,8 @@ def kb_home(has_paid: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎯 Попробовать", callback_data="try")],
         [InlineKeyboardButton("🖼 Генерации", callback_data="gen_menu")],
         [InlineKeyboardButton("👤 Мой аккаунт", callback_data="account")],
-        [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_menu")],
+        # ⬇️ Переименована кнопка реферальной программы
+        [InlineKeyboardButton("👯‍♀️ Поделись ссылкой с подругой — и получи 20% кэшбэка!", callback_data="ref_menu")],
         [InlineKeyboardButton("📸 Примеры", callback_data="examples")],
         [InlineKeyboardButton("🆘 Поддержка", callback_data="support")],
     ])
@@ -656,13 +657,14 @@ class TgApp:
 
         if data == "ref_menu":
             link = f"https://t.me/{(await context.bot.get_me()).username}?start={get_user(uid).ref_code}"
+            # ⬇️ Сделали ссылку кликабельной (убрали <code>...</code>)
             text = (
                 "🤝 <b>Реферальная программа</b>\n\n"
                 "Приглашай друзей и получай:\n"
                 "• <b>20%</b> с их покупок — на твой баланс (руб.)\n"
                 "• Друзьям — <b>−10%</b> на первый заказ\n\n"
                 "Твоя персональная ссылка:\n"
-                f"<code>{link}</code>\n\n"
+                f"{link}\n\n"
                 "Размести её в сторис, чатах или отправь лично — начисления придут автоматически."
             )
             await q.message.reply_text(text, reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
@@ -705,7 +707,7 @@ class TgApp:
                 for i, r in enumerate(refs[:50], 1):
                     status = "оплатил(а)" if r["paid"] else "без оплаты"
                     lines.append(f"{i}. <code>{r['id']}</code> — {status}, баланс: {r['balance']}")
-                lines.append("\nПродолжай делиться — это окупает поколения! ✨".replace("поколения","генерации"))
+                lines.append("\nПродолжай делиться — это окупает генерации! ✨")
                 text = "\n".join(lines)
             await q.message.reply_text(text, reply_markup=kb_ref_menu(uid), parse_mode=ParseMode.HTML); return
 
