@@ -1,5 +1,5 @@
 # main.py
-import os, io, zipfile, uuid, time, logging, asyncio, base64, json
+import os, io, zipfile, uuid, time, logging, asyncio, base64, json, smtplib
 from typing import Dict, Any, Optional, List, Tuple
 
 import httpx
@@ -7,8 +7,9 @@ from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Res
 from fastapi.staticfiles import StaticFiles
 from telegram import Update
 from telegram.error import TelegramError
+from email.message import EmailMessage
 
-from bot import tg_app, get_user, save_user
+from bot import tg_app, get_user, save_user, DB  # добавил DB для админки
 
 # ---------- ENV ----------
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -37,6 +38,19 @@ FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
 YOOKASSA_API_BASE = (os.getenv("YOOKASSA_API_BASE") or "https://api.yookassa.ru").rstrip("/")
+
+# ---------- SMTP / RECEIPTS ----------
+SMTP_HOST = (os.getenv("SMTP_HOST") or "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER = (os.getenv("SMTP_USER") or "").strip()
+SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD") or "").strip()
+SMTP_FROM = (os.getenv("SMTP_FROM") or SMTP_USER or "").strip()
+
+# Адрес, куда слать копии чеков (можно переопределить в ENV)
+RECEIPTS_BCC_EMAIL = (os.getenv("RECEIPTS_BCC_EMAIL") or "r197rr@inbox.ru").strip()
+
+# ---------- ADMIN ----------
+ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("web")
@@ -249,6 +263,51 @@ def _extract_version_hash_from_pointer(pointer: str) -> str:
     if ":" in pointer:
         return pointer.split(":")[-1].strip()
     return pointer.strip()
+
+# ---- EMAIL HELPERS ----
+def _smtp_config_ok() -> bool:
+    return all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, RECEIPTS_BCC_EMAIL])
+
+def _build_receipt_email_subject(amount_rub: int, payment_id: str) -> str:
+    return f"Чек оплаты • {amount_rub} ₽ • {payment_id}"
+
+def _build_receipt_email_text(user_id: int, qty: int, amount_rub: int, payment_id: str) -> str:
+    return (
+        "Новая оплата подтверждена.\n\n"
+        f"• User ID: {user_id}\n"
+        f"• Кол-во генераций: {qty}\n"
+        f"• Сумма: {amount_rub} ₽\n"
+        f"• Payment ID: {payment_id}\n"
+        f"• Время: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n"
+    )
+
+def _send_email_sync(to_list: List[str], subject: str, text: str):
+    if not _smtp_config_ok():
+        raise RuntimeError("SMTP config is incomplete")
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = ", ".join(to_list)
+    msg["Subject"] = subject
+    msg.set_content(text)
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as s:
+        s.login(SMTP_USER, SMTP_PASSWORD)
+        s.send_message(msg)
+
+async def _send_email_async(to_list: List[str], subject: str, text: str):
+    try:
+        await asyncio.to_thread(_send_email_sync, to_list, subject, text)
+        log.info("Receipt copy email sent to: %s", to_list)
+    except Exception as e:
+        log.warning("Failed to send receipt copy email: %r", e)
+
+async def _send_receipt_copy_bcc(user_id: int, qty: int, amount_rub: int, payment_id: str):
+    """Отправка копии чека владельцу (BCC-почта)."""
+    if not _smtp_config_ok():
+        log.warning("SMTP not configured, skip receipt email copy")
+        return
+    subject = _build_receipt_email_subject(amount_rub, payment_id)
+    text = _build_receipt_email_text(user_id, qty, amount_rub, payment_id)
+    await _send_email_async([RECEIPTS_BCC_EMAIL], subject, text)
 
 # ---- ТРЕНИРОВКА ----
 async def call_replicate_training(images_zip_url: str, user_id: str) -> Dict[str, Any]:
@@ -526,7 +585,10 @@ async def api_pay_status(payment_id: str):
                     save_user(ref)
                 PAYMENTS[payment_id] = {**stored, "status": "succeeded"}
                 _pay_db_save(PAYMENTS)
+                # Уведомляем пользователя в TG
                 await _notify_user_credit(user_id, qty, amount)
+                # Шлём копию чека на твою почту (в фоне)
+                asyncio.create_task(_send_receipt_copy_bcc(user_id, qty, amount, payment_id))
     return {"payment_id": payment_id, "status": status}
 
 # ============ TRAIN/STATUS/GENERATE ============
@@ -619,3 +681,66 @@ async def api_generate(
 
     urls = await call_replicate_generate(prompt=prompt, model_id=(model_id or None), num_images=int(num_images or 1))
     return {"images": urls}
+
+# ============ ADMIN API ============
+def _admin_check(request: Request):
+    token = request.headers.get("X-Admin-Token") or request.query_params.get("token") or ""
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+@app.get("/admin/summary")
+async def admin_summary(request: Request):
+    _admin_check(request)
+    try:
+        users_count = len(DB)
+        balances = sum(int((DB[k].get("balance") or 0)) for k in DB)
+        models = sum(1 for k in DB if DB[k].get("has_model"))
+        paid_any = sum(1 for k in DB if DB[k].get("paid_any"))
+        payments_total = len(PAYMENTS)
+        payments_succeeded = sum(1 for p in PAYMENTS.values() if (p.get("status") == "succeeded"))
+        return {
+            "ok": True,
+            "users": users_count,
+            "balances_total": balances,
+            "models_trained": models,
+            "paid_users": paid_any,
+            "payments_total": payments_total,
+            "payments_succeeded": payments_succeeded,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"admin_summary_error: {e!r}")
+
+@app.get("/admin/payments")
+async def admin_payments(request: Request):
+    _admin_check(request)
+    # Возвращаем короткий список платежей
+    out = []
+    for pid, info in PAYMENTS.items():
+        out.append({
+            "payment_id": pid,
+            "user_id": info.get("user_id"),
+            "qty": info.get("qty"),
+            "amount": info.get("amount"),
+            "status": info.get("status"),
+            "created_at": info.get("created_at"),
+        })
+    out.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
+    return {"ok": True, "items": out[:500]}
+
+@app.get("/admin/users")
+async def admin_users(request: Request):
+    _admin_check(request)
+    # Сводка по пользователям
+    items = []
+    for uid, row in DB.items():
+        items.append({
+            "id": int(uid),
+            "balance": int(row.get("balance") or 0),
+            "has_model": bool(row.get("has_model")),
+            "paid_any": bool(row.get("paid_any")),
+            "ref_earn_total": float(row.get("ref_earn_total") or 0.0),
+            "ref_earn_ready": float(row.get("ref_earn_ready") or 0.0),
+            "first_seen_ts": float(row.get("first_seen_ts") or 0.0),
+        })
+    items.sort(key=lambda x: x.get("first_seen_ts") or 0, reverse=True)
+    return {"ok": True, "items": items[:1000]}
