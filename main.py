@@ -1,5 +1,5 @@
 # main.py
-import os, io, zipfile, uuid, time, logging, asyncio
+import os, io, zipfile, uuid, time, logging, asyncio, base64
 from typing import Dict, Any, Optional, List, Tuple
 
 import httpx
@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from telegram import Update
 from telegram.error import TelegramError
 
-from bot import tg_app
+from bot import tg_app, get_user, save_user
 
 # ---------- ENV ----------
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -33,6 +33,12 @@ REPLICATE_GEN_MODEL = os.getenv("REPLICATE_GEN_MODEL", "black-forest-labs/flux-1
 REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 
+# ---------- YOOKASSA (PAYMENTS) ----------
+# Твои данные из сообщения: live key + shop id. Лучше положить в ENV,
+# но на всякий укажем дефолты, чтобы «из коробки» работало.
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "1170079")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "live_rKNCVR_6DGkkh4t-eSX3BoxwDNn8B19Nme2F3d_1S30")
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("web")
 
@@ -41,15 +47,33 @@ app = FastAPI()
 
 # Персистентные директории (Render): можно переопределить через DATA_DIR, по умолчанию /var/data
 BASE_DIR = os.getenv("DATA_DIR", "/var/data")
-DATA_DIR = BASE_DIR  # оставляем совместимость с остальным кодом
+DATA_DIR = BASE_DIR  # совместимость
 USERS_DIR = os.path.join(DATA_DIR, "users")
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
+PAY_DB_PATH = os.path.join(DATA_DIR, "payments.json")
 os.makedirs(USERS_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
+def _pay_db_load() -> Dict[str, Any]:
+    if not os.path.exists(PAY_DB_PATH):
+        return {}
+    try:
+        with open(PAY_DB_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _pay_db_save(db: Dict[str, Any]) -> None:
+    tmp = PAY_DB_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, PAY_DB_PATH)
+
+import json
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
 jobs: Dict[str, Dict[str, Any]] = {}
+PAYMENTS: Dict[str, Any] = _pay_db_load()  # payment_id -> info
 
 # ============ TG WEBHOOK ============
 @app.on_event("startup")
@@ -110,7 +134,7 @@ async def debug_stats():
             st = (j.get("status") or "").lower()
             by_status[st] = by_status.get(st, 0) + 1
 
-        # Пример простой оценки занимаемого места (без обхода всей FS)
+        # Пример простой оценки занимаемого места
         def _dir_size(path: str) -> int:
             total = 0
             if not os.path.isdir(path):
@@ -136,6 +160,7 @@ async def debug_stats():
             "jobs": jobs_count,
             "jobs_by_status": by_status,
             "sizes": sizes,
+            "payments_total": len(PAYMENTS),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"stats_error: {e!r}")
@@ -154,6 +179,7 @@ async def debug_env():
         "GEN_MODEL": REPLICATE_GEN_MODEL,
         "GEN_VERSION": REPLICATE_GEN_VERSION,
         "GEN_FALLBACK": FLUX_FAST_MODEL,
+        "YOOKASSA_SHOP_ID": YOOKASSA_SHOP_ID,
     }
 
 # ============ WEBHOOK ============
@@ -374,6 +400,118 @@ async def api_debug_has_photos(user_id: str):
     cnt = count_user_photos(user_id)
     return {"user_id": user_id, "count": cnt, "has_photos": cnt > 0}
 
+# ---------------- PAYMENTS (YooKassa) ----------------
+def _yk_auth_header() -> str:
+    raw = f"{YOOKASSA_SHOP_ID}:{YOOKASSA_SECRET_KEY}".encode("utf-8")
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+def _rub(v: int) -> Dict[str, str]:
+    return {"value": f"{v:.2f}", "currency": "RUB"}
+
+def _pay_store(payment_id: str, payload: Dict[str, Any]):
+    PAYMENTS[payment_id] = payload
+    _pay_db_save(PAYMENTS)
+
+async def _notify_user_credit(user_id: int, qty: int, amount: int):
+    try:
+        await tg_app.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Оплата прошла: <b>{amount} ₽</b>. Начислено: <b>{qty}</b> генераций.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        log.warning(f"notify user failed: {e!r}")
+
+@app.post("/api/pay")
+async def api_pay_create(body: Dict[str, Any]):
+    """
+    Создать платёж YooKassa и вернуть confirmation_url.
+    body = { user_id:int, qty:int, amount:int, title:str }
+    """
+    user_id = int(body.get("user_id") or 0)
+    qty = int(body.get("qty") or 0)
+    amount = int(body.get("amount") or 0)
+    title = (body.get("title") or "").strip() or f"{qty} генераций"
+    if not (user_id and qty and amount):
+        raise HTTPException(400, "invalid payment params")
+
+    idemp = f"yk_{uuid.uuid4().hex}"
+    headers = {
+        "Authorization": _yk_auth_header(),
+        "Idempotence-Key": idemp,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "amount": _rub(amount),
+        "capture": True,
+        "description": f"User {user_id}: {title}",
+        "confirmation": {
+            "type": "redirect",
+            "return_url": PUBLIC_URL or "https://t.me"
+        },
+        "metadata": {
+            "user_id": user_id,
+            "qty": qty,
+            "amount": amount
+        }
+    }
+    async with httpx.AsyncClient(timeout=30) as cl:
+        r = await cl.post("https://api.yookassa.ru/v3/payments", headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, f"yookassa create failed: {r.text}")
+        data = r.json()
+
+    payment_id = data.get("id")
+    confirmation_url = (data.get("confirmation") or {}).get("confirmation_url")
+    if not payment_id or not confirmation_url:
+        raise HTTPException(500, "yookassa response invalid")
+
+    _pay_store(payment_id, {
+        "user_id": user_id,
+        "qty": qty,
+        "amount": amount,
+        "status": "pending",
+        "created_at": time.time(),
+    })
+    return {"payment_id": payment_id, "confirmation_url": confirmation_url}
+
+@app.get("/api/pay/status")
+async def api_pay_status(payment_id: str):
+    headers = {
+        "Authorization": _yk_auth_header(),
+    }
+    async with httpx.AsyncClient(timeout=20) as cl:
+        r = await cl.get(f"https://api.yookassa.ru/v3/payments/{payment_id}", headers=headers)
+        if r.status_code >= 400:
+            raise HTTPException(r.status_code, f"yookassa status failed: {r.text}")
+        data = r.json()
+    status = data.get("status")
+    meta = (data.get("metadata") or {})
+    # кредитуем, если нужно
+    if status == "succeeded":
+        stored = PAYMENTS.get(payment_id) or {}
+        if stored.get("status") != "succeeded":
+            user_id = int(meta.get("user_id") or stored.get("user_id") or 0)
+            qty = int(meta.get("qty") or stored.get("qty") or 0)
+            amount = int((data.get("amount") or {}).get("value") or stored.get("amount") or 0)
+            if user_id and qty:
+                st = get_user(user_id)
+                st.balance += qty
+                st.paid_any = True
+                save_user(st)
+                # реферал — начислим 20% от фактической суммы оплаты (если есть referer)
+                if st.referred_by:
+                    ref = get_user(st.referred_by)
+                    ref_gain = round(amount * 0.20, 2)
+                    ref.ref_earn_total += ref_gain
+                    ref.ref_earn_ready += ref_gain
+                    save_user(ref)
+                PAYMENTS[payment_id] = {**stored, "status": "succeeded"}
+                _pay_db_save(PAYMENTS)
+                await _notify_user_credit(user_id, qty, amount)
+    return {"payment_id": payment_id, "status": status}
+
+# ============ TRAIN/STATUS/GENERATE ============
 @app.post("/api/train")
 async def api_train(user_id: str = Form(...)):
     if count_user_photos(user_id) == 0:
