@@ -424,7 +424,7 @@ async def _notify_user_credit(user_id: int, qty: int, amount: int):
     except Exception as e:
         log.warning(f"notify user failed: {e!r}")
 
-# <<< ИЗМЕНЕНО: принимает JSON ИЛИ form-data >>>
+# <<< ИЗМЕНЕНО: принимает JSON/FORM + увеличенные таймауты и ретраи >>>
 @app.post("/api/pay")
 async def api_pay_create(request: Request):
     """
@@ -444,10 +444,8 @@ async def api_pay_create(request: Request):
     except Exception:
         body = {}
 
-    # нормализуем типы
     user_id = int((body.get("user_id") or 0))
     qty = int((body.get("qty") or 0))
-    # amount может прийти строкой с копейками
     amount_raw = body.get("amount") or 0
     try:
         amount = int(float(amount_raw))
@@ -468,35 +466,38 @@ async def api_pay_create(request: Request):
         "amount": _rub(amount),
         "capture": True,
         "description": f"User {user_id}: {title}",
-        "confirmation": {
-            "type": "redirect",
-            "return_url": PUBLIC_URL or "https://t.me"
-        },
-        "metadata": {
-            "user_id": user_id,
-            "qty": qty,
-            "amount": amount
-        }
+        "confirmation": {"type": "redirect", "return_url": PUBLIC_URL or "https://t.me"},
+        "metadata": {"user_id": user_id, "qty": qty, "amount": amount},
     }
-    async with httpx.AsyncClient(timeout=30) as cl:
-        r = await cl.post("https://api.yookassa.ru/v3/payments", headers=headers, json=payload)
-        if r.status_code >= 400:
-            raise HTTPException(r.status_code, f"yookassa create failed: {r.text}")
-        data = r.json()
 
-    payment_id = data.get("id")
-    confirmation_url = (data.get("confirmation") or {}).get("confirmation_url")
-    if not payment_id or not confirmation_url:
-        raise HTTPException(500, "yookassa response invalid")
+    timeout = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=10.0)
+    last_err = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as cl:
+                r = await cl.post("https://api.yookassa.ru/v3/payments", headers=headers, json=payload)
+                if r.status_code >= 400:
+                    raise HTTPException(r.status_code, f"yookassa create failed: {r.text}")
+                data = r.json()
+                payment_id = data.get("id")
+                confirmation_url = (data.get("confirmation") or {}).get("confirmation_url")
+                if not payment_id or not confirmation_url:
+                    raise HTTPException(500, "yookassa response invalid")
+                _pay_store(payment_id, {
+                    "user_id": user_id,
+                    "qty": qty,
+                    "amount": amount,
+                    "status": "pending",
+                    "created_at": time.time(),
+                })
+                return {"payment_id": payment_id, "confirmation_url": confirmation_url}
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.NetworkError) as e:
+            last_err = e
+            wait = 1.5 * (attempt + 1)
+            log.warning(f"YooKassa create timeout (try {attempt+1}/3), retry in {wait}s: {e!r}")
+            await asyncio.sleep(wait)
 
-    _pay_store(payment_id, {
-        "user_id": user_id,
-        "qty": qty,
-        "amount": amount,
-        "status": "pending",
-        "created_at": time.time(),
-    })
-    return {"payment_id": payment_id, "confirmation_url": confirmation_url}
+    raise HTTPException(status_code=504, detail=f"yookassa create timeout: {last_err!r}")
 # >>> КОНЕЦ изменения
 
 @app.get("/api/pay/status")
