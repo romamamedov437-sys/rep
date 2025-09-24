@@ -39,8 +39,9 @@ log = logging.getLogger("web")
 # ---------- APP ----------
 app = FastAPI()
 
-BASE_DIR = "/opt/render/project/src"
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# Персистентные директории (Render): можно переопределить через DATA_DIR, по умолчанию /var/data
+BASE_DIR = os.getenv("DATA_DIR", "/var/data")
+DATA_DIR = BASE_DIR  # оставляем совместимость с остальным кодом
 USERS_DIR = os.path.join(DATA_DIR, "users")
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
 os.makedirs(USERS_DIR, exist_ok=True)
@@ -86,6 +87,58 @@ async def head_root():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+# 🔎 Отладочная статистика API
+@app.get("/debug/stats")
+async def debug_stats():
+    try:
+        users = 0
+        photos_total = 0
+        if os.path.isdir(USERS_DIR):
+            for name in os.listdir(USERS_DIR):
+                up = os.path.join(USERS_DIR, name)
+                if os.path.isdir(up):
+                    users += 1
+                    pdir = os.path.join(up, "photos")
+                    if os.path.isdir(pdir):
+                        photos_total += sum(1 for fn in os.listdir(pdir) if os.path.isfile(os.path.join(pdir, fn)))
+
+        uploads_files = sum(1 for _ in os.scandir(UPLOADS_DIR)) if os.path.isdir(UPLOADS_DIR) else 0
+        jobs_count = len(jobs)
+        by_status: Dict[str, int] = {}
+        for j in jobs.values():
+            st = (j.get("status") or "").lower()
+            by_status[st] = by_status.get(st, 0) + 1
+
+        # Пример простой оценки занимаемого места (без обхода всей FS)
+        def _dir_size(path: str) -> int:
+            total = 0
+            if not os.path.isdir(path):
+                return 0
+            for rootd, _, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(rootd, f))
+                    except Exception:
+                        pass
+            return total
+
+        sizes = {
+            "users_dir_bytes": _dir_size(USERS_DIR),
+            "uploads_dir_bytes": _dir_size(UPLOADS_DIR),
+        }
+
+        return {
+            "ok": True,
+            "users": users,
+            "photos_total": photos_total,
+            "uploads_files": uploads_files,
+            "jobs": jobs_count,
+            "jobs_by_status": by_status,
+            "sizes": sizes,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"stats_error: {e!r}")
 
 @app.get("/debug/env")
 async def debug_env():
