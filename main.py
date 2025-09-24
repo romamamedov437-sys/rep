@@ -34,10 +34,9 @@ REPLICATE_GEN_VERSION = os.getenv("REPLICATE_GEN_VERSION", "latest").strip()
 FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 
 # ---------- YOOKASSA (PAYMENTS) ----------
-# Твои данные из сообщения: live key + shop id. Лучше положить в ENV,
-# но на всякий укажем дефолты, чтобы «из коробки» работало.
-YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "1170079")
-YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "live_rKNCVR_6DGkkh4t-eSX3BoxwDNn8B19Nme2F3d_1S30")
+# ВАЖНО: без дефолтов — берём только из ENV, чтобы ключи не светились в коде/репозитории.
+YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
+YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("web")
@@ -179,7 +178,8 @@ async def debug_env():
         "GEN_MODEL": REPLICATE_GEN_MODEL,
         "GEN_VERSION": REPLICATE_GEN_VERSION,
         "GEN_FALLBACK": FLUX_FAST_MODEL,
-        "YOOKASSA_SHOP_ID": YOOKASSA_SHOP_ID,
+        "YOOKASSA_SHOP_ID_SET": bool(YOOKASSA_SHOP_ID),
+        "YOOKASSA_SECRET_SET": bool(YOOKASSA_SECRET_KEY),
     }
 
 # ============ WEBHOOK ============
@@ -402,6 +402,8 @@ async def api_debug_has_photos(user_id: str):
 
 # ---------------- PAYMENTS (YooKassa) ----------------
 def _yk_auth_header() -> str:
+    if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="YOOKASSA credentials not set in environment")
     raw = f"{YOOKASSA_SHOP_ID}:{YOOKASSA_SECRET_KEY}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
@@ -493,7 +495,7 @@ async def api_pay_status(payment_id: str):
         if stored.get("status") != "succeeded":
             user_id = int(meta.get("user_id") or stored.get("user_id") or 0)
             qty = int(meta.get("qty") or stored.get("qty") or 0)
-            amount = int((data.get("amount") or {}).get("value") or stored.get("amount") or 0)
+            amount = int(float((data.get("amount") or {}).get("value") or stored.get("amount") or 0))
             if user_id and qty:
                 st = get_user(user_id)
                 st.balance += qty
