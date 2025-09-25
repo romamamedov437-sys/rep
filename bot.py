@@ -95,11 +95,20 @@ MEN_STYLE_TAGS = {
         "male traditional attire, warm key",
     ],
 }
+# 👇 Обновлён фрейминг: чаще по пояс/¾/полный рост + анти-кроп, но лицо сохраняем чётким
 MEN_FRAMING = [
-    "head-and-shoulders portrait",
-    "half-body portrait (mid-shot)",
-    "three-quarter body portrait",
-    "full-body fashion shot",
+    # плечевой портрет
+    "head-and-shoulders portrait, chest-up, full head visible, no tight face crop, "
+    "eyes in upper third, vertical 4:5, realistic background elements present",
+    # по пояс
+    "half-body portrait (mid-shot), waist-up, head and shoulders fully in frame, natural hand placement, "
+    "avoid extreme close-up, vertical 4:5 or 3:4, maintain facial sharpness",
+    # три четверти
+    "three-quarter body portrait, knees-up, full head in frame, no forehead/chin crop, "
+    "vertical 3:4, balanced perspective, face remains crisp with catchlights",
+    # полный рост
+    "full-body fashion shot, head-to-toe visible including footwear, subject entirely inside frame, "
+    "vertical 9:16 or 4:5, avoid cropping at ankles, retain eye detail and natural proportions"
 ]
 def _build_men_prompts() -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
@@ -186,11 +195,16 @@ WOMEN_STYLE_TAGS = {
         "female terrace wicker furniture, calm",
     ],
 }
+# 👇 Обновлён фрейминг: фокус на по пояс / ¾ / полный рост + анти-кроп, с приоритетом резкого лица
 WOMEN_FRAMING = [
-    "head-and-shoulders",
-    "half-body (mid-shot)",
-    "three-quarter body",
-    "full-body fashion shot",
+    "head-and-shoulders, chest-up, full head visible, no tight face crop, eyes in upper third, "
+    "vertical 4:5, realistic background retained",
+    "half-body (mid-shot), waist-up, natural hand placement, full head in frame, "
+    "avoid extreme close-up, vertical 4:5 or 3:4, maintain facial sharpness and catchlights",
+    "three-quarter body, knees-up, elegant posture, full head in frame, "
+    "no forehead/ankle crop, vertical 3:4, crisp facial detail preserved",
+    "full-body fashion shot, head-to-toe visible including footwear, subject fully inside frame, "
+    "vertical 9:16 or 4:5, avoid ankle crop, keep eyes and face well-defined"
 ]
 def _women_counts():
     keys = list(WOMEN_STYLE_TAGS.keys())
