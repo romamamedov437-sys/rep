@@ -38,6 +38,8 @@ FLUX_FAST_MODEL = "black-forest-labs/flux-1.1-dev"
 YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
 YOOKASSA_API_BASE = (os.getenv("YOOKASSA_API_BASE") or "https://api.yookassa.ru").rstrip("/")
+# Необязательный секрет для вебхука ЮKassa (если задашь в настройках)
+YOOKASSA_WEBHOOK_SECRET = (os.getenv("YOOKASSA_WEBHOOK_SECRET") or "").strip()
 
 # ---------- SMTP / RECEIPTS ----------
 SMTP_HOST = (os.getenv("SMTP_HOST") or "").strip()
@@ -144,7 +146,7 @@ async def debug_stats():
         by_status: Dict[str, int] = {}
         for j in jobs.values():
             st = (j.get("status") or "").lower()
-            by_status[st] = by_status.get(st, "0") + 1 if isinstance(by_status.get(st), int) else 1
+            by_status[st] = by_status.get(st, 0) + 1
 
         def _dir_size(path: str) -> int:
             total = 0
@@ -195,7 +197,7 @@ async def debug_env():
         "YOOKASSA_API_BASE": YOOKASSA_API_BASE,
     }
 
-# ============ WEBHOOK ============
+# ============ WEBHOOK (Telegram) ============
 @app.post("/webhook/{secret}")
 async def webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
@@ -479,6 +481,33 @@ async def _notify_user_credit(user_id: int, qty: int, amount: int):
     except Exception as e:
         log.warning(f"notify user failed: {e!r}")
 
+def _credit_if_needed_from_meta(payment_id: str, meta: Dict[str, Any], amount_value: Any = None):
+    """Начисляет генерации, если ещё не было, на основе metadata/локального стейта."""
+    stored = PAYMENTS.get(payment_id) or {}
+    if stored.get("status") == "succeeded":
+        return  # уже начисляли
+    user_id = int(meta.get("user_id") or stored.get("user_id") or 0)
+    qty = int(meta.get("qty") or stored.get("qty") or 0)
+    try:
+        amount = int(float(amount_value)) if amount_value is not None else int(stored.get("amount") or 0)
+    except Exception:
+        amount = int(stored.get("amount") or 0)
+    if user_id and qty:
+        st = get_user(user_id)
+        st.balance += qty
+        st.paid_any = True
+        save_user(st)
+        # реферальные
+        if st.referred_by:
+            ref = get_user(st.referred_by)
+            ref_gain = round(amount * 0.20, 2)
+            ref.ref_earn_total += ref_gain
+            ref.ref_earn_ready += ref_gain
+            save_user(ref)
+        PAYMENTS[payment_id] = {**stored, "status": "succeeded"}
+        _pay_db_save(PAYMENTS)
+        asyncio.create_task(_notify_user_credit(user_id, qty, amount))
+
 # принимает JSON/FORM + таймауты/ретраи/прокси
 @app.post("/api/pay")
 async def api_pay_create(request: Request):
@@ -519,7 +548,7 @@ async def api_pay_create(request: Request):
         "Content-Type": "application/json",
     }
 
-    # 🔴 ВАЖНО: Чек (УСН без НДС). Если email не передан — используем твой.
+    # ✅ Чек (УСН, без НДС)
     receipt = {
         "customer": {"email": receipt_email},
         "tax_system_code": 2,  # УСН
@@ -584,29 +613,44 @@ async def api_pay_status(payment_id: str):
     status = data.get("status")
     meta = (data.get("metadata") or {})
     if status == "succeeded":
-        stored = PAYMENTS.get(payment_id) or {}
-        if stored.get("status") != "succeeded":
-            user_id = int(meta.get("user_id") or stored.get("user_id") or 0)
-            qty = int(meta.get("qty") or stored.get("qty") or 0)
-            amount = int(float((data.get("amount") or {}).get("value") or stored.get("amount") or 0))
-            if user_id and qty:
-                st = get_user(user_id)
-                st.balance += qty
-                st.paid_any = True
-                save_user(st)
-                if st.referred_by:
-                    ref = get_user(st.referred_by)
-                    ref_gain = round(amount * 0.20, 2)
-                    ref.ref_earn_total += ref_gain
-                    ref.ref_earn_ready += ref_gain
-                    save_user(ref)
-                PAYMENTS[payment_id] = {**stored, "status": "succeeded"}
-                _pay_db_save(PAYMENTS)
-                # Уведомляем пользователя в TG
-                await _notify_user_credit(user_id, qty, amount)
-                # Шлём копию чека на твою почту (в фоне)
-                asyncio.create_task(_send_receipt_copy_bcc(user_id, qty, amount, payment_id))
+        amount_value = (data.get("amount") or {}).get("value")
+        _credit_if_needed_from_meta(payment_id, meta, amount_value)
     return {"payment_id": payment_id, "status": status}
+
+# 🔔 Вебхук от YooKassa (авто-зачисление по событию payment.succeeded)
+@app.post("/yookassa/webhook")
+async def yookassa_webhook(request: Request):
+    # Если настроишь секрет в ЮKassa → прокинь в ENV YOOKASSA_WEBHOOK_SECRET.
+    if YOOKASSA_WEBHOOK_SECRET:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {YOOKASSA_WEBHOOK_SECRET}":
+            raise HTTPException(status_code=403, detail="forbidden")
+    body = await request.json()
+    event = (body.get("event") or "").lower()
+    obj = body.get("object") or {}
+    payment_id = obj.get("id")
+    status = (obj.get("status") or "").lower()
+    meta = obj.get("metadata") or {}
+    amount_value = ((obj.get("amount") or {}).get("value") or 0)
+
+    log.info(f"YooKassa webhook: event={event} status={status} pid={payment_id}")
+    if not payment_id:
+        raise HTTPException(status_code=400, detail="no payment id in webhook")
+
+    # сохраняем запись если её не было
+    if payment_id not in PAYMENTS:
+        _pay_store(payment_id, {
+            "user_id": meta.get("user_id"),
+            "qty": meta.get("qty"),
+            "amount": int(float(amount_value)) if amount_value else meta.get("amount"),
+            "status": status,
+            "created_at": time.time(),
+        })
+
+    if event == "payment.succeeded" or status == "succeeded":
+        _credit_if_needed_from_meta(payment_id, meta, amount_value)
+
+    return {"ok": True}
 
 # ============ TRAIN/STATUS/GENERATE ============
 @app.post("/api/train")
