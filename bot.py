@@ -30,15 +30,23 @@ PRICES = {"20": 429, "40": 590, "70": 719}
 # ⚡ Акция через 24 часа после первого входа
 FLASH_OFFER = {"qty": 50, "price": 390}  # 50 генераций — 390₽
 
-# ================== PROMPTS ==================
-# Реализм без «пластика»: мягкая ретушь ~50%, текстуры кожи и поры видны.
-# Для мужчин — явные male-маркеры, мужская внешность/гардероб/поза.
-# Планы: head & shoulders / half-body / three-quarter / full-body.
+# 🎯 Спец-офферы при исчерпании баланса
+SPECIAL1 = {"qty": 60, "price": 329, "title": "60 генераций (Спец-оффер 1)"}
+SPECIAL2 = {"qty": 100, "price": 419, "title": "100 генераций (Финальный оффер)"}
 
+# ================== PROMPTS ==================
+# Реализм без «пластика»: расширено — лучшее распознавание лица и правдоподобные фоны.
+# NB: структура промптов не менялась: они всё так же собираются из фрейминга, тега стиля, света, оптики и RETREAL.
 RETREAL = (
-    "realistic photographic look, natural color science, subtle skin retouch (~50%), "
-    "pores and tiny imperfections preserved, no plastic smoothing"
+    "BASE REAL, ultra photorealistic aesthetic, natural color science, cinematic tonal range, "
+    "precise facial landmark alignment, high-fidelity facial features (sharp eyes, detailed iris catchlights, "
+    "well-defined eyelashes, realistic eyebrows), micro-texture skin with preserved pores and fine peach fuzz, "
+    "subtle skin retouch (~50%) with even gradients, no plastic smoothing, "
+    "true-to-life hair strands and flyaways, natural lip speculars, "
+    "physically-plausible background rendering (realistic interiors/streets/nature, depth layering, lens-true bokeh), "
+    "balanced contrast, gentle film-like grain"
 )
+
 OPTICS = [
     "full-frame prime 50mm", "full-frame prime 85mm", "studio 90mm macro look",
     "medium-format shallow depth", "neutral ACES-like grade", "soft diffusion filter",
@@ -259,6 +267,10 @@ class UserState:
     flash_sent: bool = False
     paid_any: bool = False
     gender_pref: Optional[str] = None
+    # 🔖 учёт спец-покупок
+    bought_spec1: bool = False
+    bought_spec2: bool = False
+    purchases: Dict[str, str] = field(default_factory=dict)  # payment_id -> "spec1"|"spec2"|...
 
 def _load_db() -> Dict[str, Any]:
     if not os.path.exists(DB_PATH):
@@ -290,13 +302,12 @@ def save_user(st: UserState) -> None:
     DB[str(st.id)] = st.__dict__
     _save_db(DB)
 
-# ================== KEYBOARDS ==================
+# ================== KEYБОАРДЫ ==================
 def kb_home(has_paid: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 Попробовать", callback_data="try")],
         [InlineKeyboardButton("🖼 Генерации", callback_data="gen_menu")],
         [InlineKeyboardButton("👤 Мой аккаунт", callback_data="account")],
-        # ⬇️ Переименована кнопка реферальной программы
         [InlineKeyboardButton("👯‍♀️ Поделись ссылкой с подругой — и получи 20% кэшбэка!", callback_data="ref_menu")],
         [InlineKeyboardButton("📸 Примеры", callback_data="examples")],
         [InlineKeyboardButton("🆘 Поддержка", callback_data="support")],
@@ -329,7 +340,6 @@ def kb_categories(gender: str) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for title in cats:
         rows.append([InlineKeyboardButton(title, callback_data=f"cat:{gender}:{title}")])
-    # 👉 назад теперь ведёт в главное меню
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_home")])
     return InlineKeyboardMarkup(rows)
 
@@ -367,6 +377,13 @@ def kb_pay_actions(payment_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
     ])
 
+def kb_special_buy(tag: str, title: str, price: int) -> InlineKeyboardMarkup:
+    # tag: "spec1"|"spec2"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 Купить — {title} за {price} ₽", callback_data=f"buy_{tag}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
+    ])
+
 # ================== APP WRAPPER ==================
 class TgApp:
     def __init__(self):
@@ -386,7 +403,6 @@ class TgApp:
         self.app.add_handler(CommandHandler("stats", self.on_stats))  # 🔹 админская статистика
         self.app.add_handler(CallbackQueryHandler(self.on_button))
         self.app.add_handler(MessageHandler(filters.PHOTO, self.on_photo))
-        # лог всего
         self.app.add_handler(MessageHandler(filters.ALL, log_any), group=-1)
         self.app.add_error_handler(on_error)
         await self.app.initialize()
@@ -559,6 +575,7 @@ class TgApp:
 
         if data == "gen_menu":
             if not st.paid_any and st.balance <= 0:
+                # при нуле — показываем обычное меню покупки
                 await q.message.reply_text("Сначала приобретите пакет.", reply_markup=kb_buy_or_back()); return
             if not st.has_model:
                 await q.message.reply_text("⏳ Модель ещё обучается или не создана. Мы напишем, когда она будет готова."); return
@@ -583,7 +600,32 @@ class TgApp:
             items = MEN_CATALOG[cat] if gender == "men" else WOMEN_CATALOG[cat]
             prompt = items[idx]
             if st.balance < 3:
-                await q.message.reply_text("Нет доступных генераций. Пополните баланс.", reply_markup=kb_buy_or_back()); return
+                # 🔔 Баланс исчерпан — показываем спец-офферы
+                if not st.bought_spec1:
+                    msg = (
+                        "⚠️ <b>Генерации закончились.</b>\n\n"
+                        "Специальное предложение только для вас:\n"
+                        f"• <b>{SPECIAL1['qty']} генераций — {SPECIAL1['price']} ₽</b>\n\n"
+                        "Нажмите «Купить», генерации начислим сразу после подтверждения."
+                    )
+                    await q.message.reply_text(
+                        msg, reply_markup=kb_special_buy("spec1", f"{SPECIAL1['qty']} генераций", SPECIAL1["price"]),
+                        parse_mode=ParseMode.HTML
+                    ); return
+                elif not st.bought_spec2:
+                    msg = (
+                        "⚠️ <b>Генерации закончились.</b>\n\n"
+                        "Такого предложения больше не будет:\n"
+                        f"• <b>{SPECIAL2['qty']} генераций — {SPECIAL2['price']} ₽</b>\n\n"
+                        "Нажмите «Купить», генерации начислим сразу после подтверждения."
+                    )
+                    await q.message.reply_text(
+                        msg, reply_markup=kb_special_buy("spec2", f"{SPECIAL2['qty']} генераций", SPECIAL2["price"]),
+                        parse_mode=ParseMode.HTML
+                    ); return
+                else:
+                    await q.message.reply_text("Нет доступных генераций. Пополните баланс.", reply_markup=kb_buy_or_back()); return
+
             await q.message.reply_text("🎨 Генерируем 3 изображения… ~30–60 секунд.")
             try:
                 imgs = await self._generate(uid, st.job_id, prompt, 3)
@@ -591,7 +633,6 @@ class TgApp:
                 await context.bot.send_message(chat_id=uid, text="❌ Ошибка при генерации. Попробуйте ещё раз.")
                 return
             st.balance -= 3; save_user(st)
-            # HTML в подписи к первому фото
             media = [InputMediaPhoto(imgs[0], caption=f"Готово! Списано: 3. Остаток: <b>{st.balance}</b>", parse_mode=ParseMode.HTML)] + [InputMediaPhoto(u) for u in imgs[1:]]
             await context.bot.send_media_group(chat_id=uid, media=media)
             if st.gender_pref in ("men", "women"):
@@ -599,6 +640,27 @@ class TgApp:
             else:
                 await context.bot.send_message(chat_id=uid, text="Ещё стиль?", reply_markup=kb_gender())
             return
+
+        # —— спец-офферы покупки
+        if data in ("buy_spec1", "buy_spec2"):
+            spec = SPECIAL1 if data.endswith("spec1") else SPECIAL2
+            info, err = await self._start_payment(uid, spec["qty"], spec["price"], spec["title"])
+            if err:
+                await q.message.reply_text(err); return
+            pay_url, pid = info
+            # привяжем тип покупки к payment_id, чтобы по подтверждению отметить покупку корректно
+            st.purchases[pid] = "spec1" if data.endswith("spec1") else "spec2"
+            save_user(st)
+            await q.message.reply_text(
+                f"🧾 К оплате: <b>{spec['price']} ₽</b>\nПакет: <b>{spec['qty']}</b> генераций.\n\n"
+                "Нажми «Оплатить», затем «✅ Я оплатил(а)» для проверки.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+                    [InlineKeyboardButton("✅ Я оплатил(а)", callback_data=f"paycheck:{pid}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")],
+                ]),
+                parse_mode=ParseMode.HTML
+            ); return
 
         if data.startswith("paycheck:"):
             payment_id = data.split(":", 1)[1]
@@ -614,7 +676,15 @@ class TgApp:
             if status != "succeeded":
                 await q.message.reply_text("⏳ Платёж ещё не подтверждён. Попробуйте позже."); return
 
+            # отметим, что это был спец-оффер (если да)
             st = get_user(uid)
+            tag = (st.purchases or {}).pop(payment_id, None)
+            if tag == "spec1":
+                st.bought_spec1 = True
+            elif tag == "spec2":
+                st.bought_spec2 = True
+            save_user(st)
+
             await q.message.reply_text(
                 f"✅ Платёж подтверждён. Текущий баланс: <b>{st.balance}</b>.",
                 parse_mode=ParseMode.HTML
@@ -657,7 +727,6 @@ class TgApp:
 
         if data == "ref_menu":
             link = f"https://t.me/{(await context.bot.get_me()).username}?start={get_user(uid).ref_code}"
-            # ⬇️ Сделали ссылку кликабельной (убрали <code>...</code>)
             text = (
                 "🤝 <b>Реферальная программа</b>\n\n"
                 "Приглашай друзей и получай:\n"
@@ -681,7 +750,6 @@ class TgApp:
             ); return
 
         if data == "ref_list":
-            # 👉 Реальное отображение рефералов
             refs: List[Dict[str, Any]] = []
             for k, v in DB.items():
                 try:
