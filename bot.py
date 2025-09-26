@@ -28,7 +28,8 @@ os.makedirs(PHOTOS_TMP, exist_ok=True)
 PRICES = {"20": 429, "40": 590, "70": 719}
 
 # ⚡ Акция через 24 часа после первого входа
-FLASH_OFFER = {"qty": 50, "price": 390}  # 50 генераций — 390₽
+# 🔁 Обновлено: 60 генераций за 390 ₽
+FLASH_OFFER = {"qty": 60, "price": 390}  # 60 генераций — 390₽
 
 # 🎯 Спец-офферы при исчерпании баланса
 SPECIAL1 = {"qty": 60, "price": 329, "title": "60 генераций (Спец-оффер 1)"}
@@ -97,18 +98,10 @@ MEN_STYLE_TAGS = {
 }
 # 👇 Обновлён фрейминг: чаще по пояс/¾/полный рост + анти-кроп, но лицо сохраняем чётким
 MEN_FRAMING = [
-    # плечевой портрет
-    "head-and-shoulders portrait, chest-up, full head visible, no tight face crop, "
-    "eyes in upper third, vertical 4:5, realistic background elements present",
-    # по пояс
-    "half-body portrait (mid-shot), waist-up, head and shoulders fully in frame, natural hand placement, "
-    "avoid extreme close-up, vertical 4:5 or 3:4, maintain facial sharpness",
-    # три четверти
-    "three-quarter body portrait, knees-up, full head in frame, no forehead/chin crop, "
-    "vertical 3:4, balanced perspective, face remains crisp with catchlights",
-    # полный рост
-    "full-body fashion shot, head-to-toe visible including footwear, subject entirely inside frame, "
-    "vertical 9:16 or 4:5, avoid cropping at ankles, retain eye detail and natural proportions"
+    "head-and-shoulders portrait, chest-up, full head visible, no tight face crop, eyes in upper third, vertical 4:5, realistic background elements present",
+    "half-body portrait (mid-shot), waist-up, head and shoulders fully in frame, natural hand placement, avoid extreme close-up, vertical 4:5 or 3:4, maintain facial sharpness",
+    "three-quarter body portrait, knees-up, full head in frame, no forehead/chin crop, vertical 3:4, balanced perspective, face remains crisp with catchlights",
+    "full-body fashion shot, head-to-toe visible including footwear, subject entirely inside frame, vertical 9:16 or 4:5, avoid cropping at ankles, retain eye detail and natural proportions"
 ]
 def _build_men_prompts() -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
@@ -197,14 +190,10 @@ WOMEN_STYLE_TAGS = {
 }
 # 👇 Обновлён фрейминг: фокус на по пояс / ¾ / полный рост + анти-кроп, с приоритетом резкого лица
 WOMEN_FRAMING = [
-    "head-and-shoulders, chest-up, full head visible, no tight face crop, eyes in upper third, "
-    "vertical 4:5, realistic background retained",
-    "half-body (mid-shot), waist-up, natural hand placement, full head in frame, "
-    "avoid extreme close-up, vertical 4:5 or 3:4, maintain facial sharpness and catchlights",
-    "three-quarter body, knees-up, elegant posture, full head in frame, "
-    "no forehead/ankle crop, vertical 3:4, crisp facial detail preserved",
-    "full-body fashion shot, head-to-toe visible including footwear, subject fully inside frame, "
-    "vertical 9:16 or 4:5, avoid ankle crop, keep eyes and face well-defined"
+    "head-and-shoulders, chest-up, full head visible, no tight face crop, eyes in upper third, vertical 4:5, realistic background retained",
+    "half-body (mid-shot), waist-up, natural hand placement, full head in frame, avoid extreme close-up, vertical 4:5 or 3:4, maintain facial sharpness and catchlights",
+    "three-quarter body, knees-up, elegant posture, full head in frame, no forehead/ankle crop, vertical 3:4, crisp facial detail preserved",
+    "full-body fashion shot, head-to-toe visible including footwear, subject fully inside frame, vertical 9:16 or 4:5, avoid ankle crop, keep eyes and face well-defined"
 ]
 def _women_counts():
     keys = list(WOMEN_STYLE_TAGS.keys())
@@ -807,7 +796,8 @@ class TgApp:
                 parse_mode=ParseMode.HTML
             ); return
 
-        if data == "buy_flash_50":
+        # 🔁 Акция через 24 часа: 60 генераций за 390 ₽
+        if data == "buy_flash_60":
             qty = FLASH_OFFER["qty"]
             price = FLASH_OFFER["price"]
             info, err = await self._start_payment(uid, qty, price, f"{qty} генераций (Акция 24ч)")
@@ -815,7 +805,7 @@ class TgApp:
                 await q.message.reply_text(err); return
             pay_url, pid = info
             await q.message.reply_text(
-                f"🔥 Акция 24ч: <b>{qty}</b> генераций за <b>{price} ₽</b>.\n\n"
+                f"🧾 К оплате: <b>{price} ₽</b>\nПакет: <b>{qty}</b> генераций.\n\n"
                 "Нажми «Оплатить», затем «✅ Я оплатил(а)» для проверки.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
@@ -915,7 +905,7 @@ class TgApp:
 
     # ---------- FLASH OFFER SCHEDULER ----------
     async def _flash_offer_scheduler(self):
-        """Через ~24 часа после первого входа — разовая акция 50 генераций за 390₽."""
+        """Через ~24 часа после первого входа — разовая акция 60 генераций за 390₽."""
         while True:
             now = time.time()
             try:
@@ -932,18 +922,21 @@ class TgApp:
             await asyncio.sleep(1800)
 
     async def _send_flash_offer(self, uid: int):
+        # клавиатура акции
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🔥 Купить 50 генераций — {FLASH_OFFER['price']} ₽", callback_data="buy_flash_50")],
+            [InlineKeyboardButton(f"🔥 Купить 60 генераций — {FLASH_OFFER['price']} ₽", callback_data="buy_flash_60")],
+            [InlineKeyboardButton("📸 Канал с примерами", url="https://t.me/PhotoFly_Examples")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="back_home")]
         ])
         try:
             await self.app.bot.send_message(
                 chat_id=uid,
                 text=(
-                    "⚡ <b>Акция на 24 часа</b>\n\n"
-                    f"Для вас подготовлено предложение: <b>{FLASH_OFFER['qty']} генераций</b> всего за "
-                    f"<b>{FLASH_OFFER['price']} ₽</b>.\n\n"
-                    "Успей воспользоваться и пополнить баланс выгодно!"
+                    "⏳ <b>Только 24 часа!</b>\n\n"
+                    f"Специально для вас — <b>{FLASH_OFFER['qty']} генераций</b> всего за <b>{FLASH_OFFER['price']} ₽</b>.\n"
+                    "Идеально, чтобы протестировать больше стилей и ракурсов.\n\n"
+                    "Посмотреть результаты других можно в нашем канале с примерами: "
+                    "https://t.me/PhotoFly_Examples"
                 ),
                 reply_markup=kb, parse_mode=ParseMode.HTML
             )
